@@ -5,8 +5,10 @@
 ============================================================================
 左边填元数据、右边写正文，点一下就生成静态页面并重建首页。
 
-    python tools/writepad.py            打开写字板
-    python tools/writepad.py <slug>     直接打开某个项目
+    python tools/writepad.py                     打开写字板
+    python tools/writepad.py <slug>              直接打开某个项目
+    python tools/writepad.py --theme dark        本次以暗色主题启动
+    python tools/writepad.py --zoom 125          本次以 125% 缩放启动
 
 为什么是 tkinter 而不是网页版编辑器
     「输入 → 本地出 HTML → 打包上传」这条链子必须在断网、也没有任何第三方
@@ -14,11 +16,12 @@
     的活由同目录的 research_core.py 干，这个文件只负责界面。
 
 界面速查
-    Ctrl+S        保存（写回 content/<slug>/）
-    Ctrl+Enter    生成当前项目 + 重建首页
-    F5            在浏览器里预览（内置了一个只读的本地预览服务器）
-    Ctrl+B/I/K    加粗 / 斜体 / 链接
-    Ctrl+Z        撤销（正文框开了 undo）
+    文件    Ctrl+N 新建 · Ctrl+S 保存 · Ctrl+Enter 保存并生成 · F5 预览
+    编辑    Ctrl+F 查找替换 · F3 / Shift+F3 下一个 / 上一个 · Esc 关掉查找条
+            Ctrl+Z / Ctrl+Y 撤销 / 重做 · Tab / Shift+Tab 缩进 / 反缩进
+            Ctrl+B / Ctrl+I / Ctrl+K 加粗 / 斜体 / 链接
+    视图    Ctrl+= / Ctrl+- / Ctrl+0 放大 / 缩小 / 复位（Ctrl+滚轮也可以）
+            Ctrl+T 亮暗主题切换 · Ctrl+L 运行日志面板 · F11 全屏
 
 几个刻意的设计
 1. 预览走本地 HTTP 而不是 file://
@@ -29,10 +32,14 @@
    所以不会被「从分支部署」发布出去，反悔了还能捞回来。
 3. 改路径 = 改目录名
    保存时如果 slug 变了，会调用 core.rename_record 把目录改名并清掉旧页面。
+4. 主题与缩放都是「本机偏好」
+   存在 tools/.writepad-state.json（已 gitignore），不进仓库、不影响生成的页面。
+   生成出来的站点目前只有亮色一套配色 —— 那是另一件事。
 """
 
 from __future__ import annotations
 
+import argparse
 import datetime as _dt
 import functools
 import http.server
@@ -62,6 +69,60 @@ COLOR_CHOICES = [
     ("blue", "蓝"), ("pink", "粉"), ("green", "绿"),
     ("lav", "紫"), ("amber", "琥珀"), ("gray", "灰"),
 ]
+
+# ── 缩放 ──────────────────────────────────────────────────────────────────
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 0.8, 2.0, 0.1
+ZOOM_DEFAULT = 1.0
+BASE_UI_SIZE, BASE_EDITOR_SIZE, BASE_SUMMARY_SIZE, BASE_LOG_SIZE = 10, 11, 10, 9
+#: 左栏（项目元数据）在 100% 缩放下的宽度；缩放时会按比例调整
+META_WIDTH_BASE = 420
+
+# ── 主题 ──────────────────────────────────────────────────────────────────
+#: 两套配色的键必须完全一致；"system" 会在运行时解析成其中之一
+PALETTES: dict[str, dict[str, str]] = {
+    "light": {
+        "bg": "#E4E9F0",          # 窗口底色（面板之间露出来的部分）
+        "panel": "#F8FAFC",       # 面板 / 卡片
+        "field": "#FFFFFF",       # 输入框、按钮
+        "border": "#CBD5E1",
+        "text": "#1E293B",
+        "muted": "#64748B",
+        "accent": "#3B82F6",
+        "accent_dark": "#2563EB",
+        "accent_text": "#FFFFFF",
+        "hover": "#E9EEF5",
+        "editor_bg": "#FFFFFF",
+        "editor_fg": "#1E293B",
+        "select_bg": "#BFDBFE",
+        "select_fg": "#0F172A",
+        "curline": "#F1F5F9",     # 当前行底色
+        "find_bg": "#FDE68A",     # 所有匹配
+        "find_fg": "#78350F",
+        "log_bg": "#FFFFFF",
+        "ok": "#047857", "warn": "#B45309", "err": "#B91C1C", "dim": "#94A3B8",
+    },
+    "dark": {
+        "bg": "#0B1220",
+        "panel": "#151E2E",
+        "field": "#0F172A",
+        "border": "#2C3B54",
+        "text": "#E2E8F0",
+        "muted": "#93A6C0",
+        "accent": "#3B82F6",
+        "accent_dark": "#2563EB",
+        "accent_text": "#FFFFFF",
+        "hover": "#22304A",
+        "editor_bg": "#0F172A",
+        "editor_fg": "#DCE6F5",
+        "select_bg": "#1D4ED8",
+        "select_fg": "#FFFFFF",
+        "curline": "#1A2436",
+        "find_bg": "#7A5810",
+        "find_fg": "#FDE68A",
+        "log_bg": "#0F172A",
+        "ok": "#34D399", "warn": "#FBBF24", "err": "#F87171", "dim": "#64748B",
+    },
+}
 
 #: 图标的中文说法。写字板里只显示名字，看不懂 fa-thermometer-half 是干什么的，
 #: 所以给每个候选图标配一句人话（图标本身要页面上才看得到）。
@@ -123,6 +184,33 @@ ICON_LABELS = {
     "fa-question-circle": "问号 · 待查",
 }
 
+SHORTCUTS = [
+    ("文件", ""),
+    ("Ctrl+N", "新建项目"),
+    ("Ctrl+S", "保存（写回 content/<项目>/）"),
+    ("Ctrl+Enter", "保存 → 生成这个项目 → 重建首页"),
+    ("F5", "在浏览器里预览当前项目"),
+    ("", ""),
+    ("编辑", ""),
+    ("Ctrl+F", "查找与替换（Esc 关闭）"),
+    ("F3 / Shift+F3", "下一个 / 上一个匹配"),
+    ("Ctrl+Z / Ctrl+Y", "撤销 / 重做"),
+    ("Tab / Shift+Tab", "缩进 / 反缩进（多选时整块处理）"),
+    ("Enter", "自动延续缩进与列表标记"),
+    ("Ctrl+B / Ctrl+I / Ctrl+K", "加粗 / 斜体 / 链接"),
+    ("", ""),
+    ("视图", ""),
+    ("Ctrl+= / Ctrl+-", "放大 / 缩小界面（Ctrl+滚轮同效）"),
+    ("Ctrl+0", "恢复 100% 缩放"),
+    ("Ctrl+T", "亮色 / 暗色主题切换"),
+    ("Ctrl+L", "显示 / 隐藏运行日志面板"),
+    ("F11", "全屏切换"),
+]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  小工具
+# ══════════════════════════════════════════════════════════════════════════
 
 def normalize_slug(raw: str) -> str:
     """把用户输入的路径整理一下：转小写，空格和下划线换成连字符
@@ -135,6 +223,39 @@ def normalize_slug(raw: str) -> str:
     text = (raw or "").strip().lower().replace("_", "-").replace(" ", "-")
     text = re.sub(r"-{2,}", "-", text)
     return text.strip("-")
+
+
+def system_prefers_dark() -> bool:
+    """读 Windows 的「应用模式」设置。非 Windows 或读不到时按亮色处理。"""
+    try:
+        import winreg
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            return int(value) == 0
+    except Exception:
+        return False
+
+
+def enable_dpi_awareness() -> None:
+    """声明 DPI 感知，高分屏上文字才不发虚。
+
+    不声明的话 Windows 会把整个窗口位图拉伸放大，150% 缩放下字会糊。
+    声明之后 Tk 自己会按真实 DPI 换算字号，界面整体也会略大一点 —— 这正是想要的。
+    """
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)   # PROCESS_SYSTEM_DPI_AWARE
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -183,18 +304,31 @@ class PreviewServer:
 
 
 # ══════════════════════════════════════════════════════════════════════════
-#  新建项目对话框
+#  对话框
 # ══════════════════════════════════════════════════════════════════════════
 
-class NewProjectDialog(tk.Toplevel):
+class _ThemedToplevel(tk.Toplevel):
+    """跟着主窗口配色的 Toplevel 基类。
+
+    ttk 的样式是全局的，所以内部控件会自动跟随；只有 Toplevel 自己的
+    背景色要手动设 —— 否则暗色主题下会露出一圈系统色的白边。
+    """
+
+    def __init__(self, master, palette: dict):
+        super().__init__(master)
+        self.palette = palette
+        self.configure(background=palette["panel"])
+
+
+class NewProjectDialog(_ThemedToplevel):
     """新建项目：标题 + 路径
 
     路径必须是小写 ASCII 的短名。中文标题不能直接当路径 —— GitHub Pages 会把
     中文路径服务成一长串百分号编码，分享和记笔记时都很难用。
     """
 
-    def __init__(self, master, cfg: dict):
-        super().__init__(master)
+    def __init__(self, master, cfg: dict, palette: dict):
+        super().__init__(master, palette)
         self.title("新建项目")
         self.resizable(False, False)
         self.transient(master)
@@ -203,7 +337,6 @@ class NewProjectDialog(tk.Toplevel):
         self.var_title = tk.StringVar()
         self.var_slug = tk.StringVar(value=f"exp-{_dt.date.today().strftime('%Y%m%d')}")
         self.var_status = tk.StringVar(value="进行中")
-        self._slug_touched = False
 
         body = ttk.Frame(self, padding=18)
         body.pack(fill="both", expand=True)
@@ -214,15 +347,12 @@ class NewProjectDialog(tk.Toplevel):
         entry_title.grid(row=0, column=1, sticky="ew", pady=(0, 4))
 
         ttk.Label(body, text="路径（URL）").grid(row=1, column=0, sticky="w", pady=4)
-        entry_slug = ttk.Entry(body, textvariable=self.var_slug, width=42)
-        entry_slug.grid(row=1, column=1, sticky="ew", pady=4)
-        self.var_slug.trace_add("write", self._on_slug_change)
+        ttk.Entry(body, textvariable=self.var_slug, width=42).grid(row=1, column=1, sticky="ew", pady=4)
 
         ttk.Label(
-            body,
+            body, style="Muted.TLabel", justify="left",
             text="只用小写字母、数字和连字符，例如 annealing-rate。\n"
                  "它同时是目录名和网址：research.who-young.top/路径/",
-            foreground="#6B7280", justify="left",
         ).grid(row=2, column=1, sticky="w", pady=(0, 8))
 
         ttk.Label(body, text="初始状态").grid(row=3, column=0, sticky="w", pady=4)
@@ -230,22 +360,20 @@ class NewProjectDialog(tk.Toplevel):
                      values=[label for _, label in STATUS_CHOICES]).grid(row=3, column=1, sticky="w", pady=4)
 
         ttk.Label(body, text="正文模板").grid(row=4, column=0, sticky="w", pady=4)
-        ttk.Label(body, text="目的与假设 / 装置与参数 / 步骤 / 原始数据 / 分析与讨论 / 结论",
-                  foreground="#6B7280").grid(row=4, column=1, sticky="w", pady=4)
+        ttk.Label(body, style="Muted.TLabel",
+                  text="目的与假设 / 装置与参数 / 步骤 / 原始数据 / 分析与讨论 / 结论",
+                  ).grid(row=4, column=1, sticky="w", pady=4)
 
         buttons = ttk.Frame(body)
         buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(16, 0))
         ttk.Button(buttons, text="取消", command=self.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(buttons, text="创建", command=self._ok, style="Accent.TButton").pack(side="right")
+        ttk.Button(buttons, text="创建", style="Accent.TButton", command=self._ok).pack(side="right")
 
         entry_title.focus_set()
         self.bind("<Return>", lambda _e: self._ok())
         self.bind("<Escape>", lambda _e: self.destroy())
         self.grab_set()
         self.wait_visibility()
-
-    def _on_slug_change(self, *_args):
-        self._slug_touched = True
 
     def _ok(self):
         title = self.var_title.get().strip()
@@ -270,11 +398,7 @@ class NewProjectDialog(tk.Toplevel):
         self.destroy()
 
 
-# ══════════════════════════════════════════════════════════════════════════
-#  站点设置对话框
-# ══════════════════════════════════════════════════════════════════════════
-
-class SettingsDialog(tk.Toplevel):
+class SettingsDialog(_ThemedToplevel):
     """编辑 content/_site.json（外链、目录预览条数、首页开关）"""
 
     FIELDS = [
@@ -290,8 +414,8 @@ class SettingsDialog(tk.Toplevel):
         ("show_catalog", "首页显示完整目录"),
     ]
 
-    def __init__(self, master, cfg: dict):
-        super().__init__(master)
+    def __init__(self, master, cfg: dict, palette: dict):
+        super().__init__(master, palette)
         self.title("站点设置")
         self.resizable(False, False)
         self.transient(master)
@@ -309,7 +433,7 @@ class SettingsDialog(tk.Toplevel):
             var = tk.StringVar(value=str(self.cfg.get(key, "")))
             self.vars[key] = var
             ttk.Entry(body, textvariable=var, width=46).grid(row=row, column=1, sticky="ew", pady=4)
-            ttk.Label(body, text=hint, foreground="#9CA3AF").grid(
+            ttk.Label(body, style="Muted.TLabel", text=hint).grid(
                 row=row, column=2, sticky="w", padx=(10, 0), pady=4)
 
         for offset, (key, label) in enumerate(self.SWITCHES):
@@ -318,20 +442,18 @@ class SettingsDialog(tk.Toplevel):
             ttk.Checkbutton(body, text=label, variable=var).grid(
                 row=len(self.FIELDS) + offset, column=1, sticky="w", pady=2)
 
-        note = ttk.Label(
-            body,
+        ttk.Label(
+            body, style="Muted.TLabel", justify="left",
             text="界面上的固定文案（标题、按钮、页脚）在 lang/cn.json 里，\n"
                  "改完这里记得点「重新生成全部」让页面生效。",
-            foreground="#6B7280", justify="left",
-        )
-        note.grid(row=len(self.FIELDS) + len(self.SWITCHES), column=0, columnspan=3,
-                  sticky="w", pady=(12, 0))
+        ).grid(row=len(self.FIELDS) + len(self.SWITCHES), column=0, columnspan=3,
+               sticky="w", pady=(12, 0))
 
         buttons = ttk.Frame(body)
         buttons.grid(row=len(self.FIELDS) + len(self.SWITCHES) + 1, column=0, columnspan=3,
                      sticky="e", pady=(16, 0))
         ttk.Button(buttons, text="取消", command=self.destroy).pack(side="right", padx=(8, 0))
-        ttk.Button(buttons, text="保存", command=self._ok, style="Accent.TButton").pack(side="right")
+        ttk.Button(buttons, text="保存", style="Accent.TButton", command=self._ok).pack(side="right")
 
         self.bind("<Return>", lambda _e: self._ok())
         self.bind("<Escape>", lambda _e: self.destroy())
@@ -356,6 +478,46 @@ class SettingsDialog(tk.Toplevel):
         self.destroy()
 
 
+class ShortcutsDialog(_ThemedToplevel):
+    """快捷键与图注写法的小抄"""
+
+    def __init__(self, master, palette: dict, ui_family: str, key_family: str):
+        super().__init__(master, palette)
+        self.title("快捷键")
+        self.transient(master)
+        self.geometry("580x600")
+
+        wrap = ttk.Frame(self, padding=(14, 12, 14, 12))
+        wrap.pack(fill="both", expand=True)
+
+        text = tk.Text(wrap, wrap="none", relief="flat", borderwidth=0,
+                       background=palette["panel"], foreground=palette["text"],
+                       font=(ui_family, 10), cursor="arrow")
+        scroll = ttk.Scrollbar(wrap, orient="vertical", command=text.yview)
+        text.configure(yscrollcommand=scroll.set)
+        text.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        text.tag_configure("head", foreground=palette["accent"], spacing1=10, spacing3=4)
+        text.tag_configure("key", foreground=palette["text"], font=(key_family, 10))
+        text.tag_configure("note", foreground=palette["muted"])
+
+        for key, note in SHORTCUTS:
+            if not key and not note:
+                text.insert("end", "\n")
+            elif not note:
+                text.insert("end", f"{key}\n", "head")
+            else:
+                text.insert("end", f"{key:<24}", "key")
+                text.insert("end", f"{note}\n", "note")
+        text.configure(state="disabled")
+
+        ttk.Button(self, text="关闭", command=self.destroy).pack(pady=(0, 14))
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.grab_set()
+        self.wait_visibility()
+
+
 # ══════════════════════════════════════════════════════════════════════════
 #  主窗口
 # ══════════════════════════════════════════════════════════════════════════
@@ -369,11 +531,22 @@ class WritepadApp:
         self.dirty = False
         self._loading = False          # 载入项目时抑制 dirty 标记
         self._count_job = None
+        self._find_job = None
         self._preview: PreviewServer | None = None
         self._body_snapshot = ""       # 用来判断正文是否真的改过
+        self._menus: list[tk.Menu] = []
+        self._scroll_rows: list[tuple[tk.Canvas, object]] = []
+        self._zoom_done = False
+        self._palette_id: int | None = None
+
+        # 视图偏好
+        self.theme_choice = "system"    # light / dark / system
+        self.zoom = ZOOM_DEFAULT
+        self.log_visible = True
 
         self.mono = tk.BooleanVar(value=False)
         self.auto_update = tk.BooleanVar(value=True)
+        self.var_theme = tk.StringVar(value=self.theme_choice)
         self.var_title = tk.StringVar()
         self.var_slug = tk.StringVar()
         self.var_date = tk.StringVar()
@@ -388,26 +561,326 @@ class WritepadApp:
         self.var_project = tk.StringVar()
         self.var_statusbar = tk.StringVar(value="就绪")
         self.var_counts = tk.StringVar(value="")
+        self.var_cursor = tk.StringVar(value="")
+        self.var_zoom = tk.StringVar(value="缩放 100%")
+        self.find_var = tk.StringVar()
+        self.replace_var = tk.StringVar()
+        self.find_nocase = tk.BooleanVar(value=True)
+        self.var_find_info = tk.StringVar(value="")
 
         self._setup_fonts()
         self._build_ui()
         self._bind_keys()
+        self.apply_theme()
+        self.set_zoom(self.zoom, announce=False)
         self.reload_records()
         self._restore_state()
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.root.bind("<FocusIn>", self._on_root_focus)
 
-    # ── 外观 ─────────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  主题
+    # ══════════════════════════════════════════════════════════════════
+    def _palette(self) -> dict:
+        """把 light / dark / system 解析成一套具体颜色"""
+        choice = self.theme_choice
+        if choice == "system":
+            choice = "dark" if system_prefers_dark() else "light"
+        return PALETTES[choice if choice in PALETTES else "light"]
+
+    def apply_theme(self):
+        """把当前配色刷到所有控件上
+
+        ttk 的样式是全局的（按 root 记），所以配一次就够；tk 的原生控件
+        （Text / Canvas / Menu）不吃 ttk 样式，必须单独 configure。
+        """
+        pal = self._palette()
+        self._palette_id = id(pal)
+        style = ttk.Style(self.root)
+
+        self.root.configure(background=pal["bg"])
+
+        # ── 通用默认 ──
+        style.configure(".", background=pal["panel"], foreground=pal["text"],
+                        fieldbackground=pal["field"], bordercolor=pal["border"],
+                        lightcolor=pal["panel"], darkcolor=pal["panel"],
+                        troughcolor=pal["bg"], focuscolor=pal["accent"],
+                        selectbackground=pal["accent"], selectforeground=pal["accent_text"])
+
+        style.configure("TFrame", background=pal["panel"])
+        style.configure("Bg.TFrame", background=pal["bg"])
+        style.configure("TLabel", background=pal["panel"], foreground=pal["text"])
+        style.configure("Muted.TLabel", background=pal["panel"], foreground=pal["muted"])
+        style.configure("Status.TLabel", background=pal["panel"], foreground=pal["muted"])
+
+        style.configure("TLabelframe", background=pal["panel"], bordercolor=pal["border"],
+                        relief="solid", borderwidth=1)
+        for name in ("TLabelframe.Label", "Group.TLabelframe.Label"):
+            style.configure(name, background=pal["panel"], foreground=pal["muted"])
+
+        style.configure("TSeparator", background=pal["border"])
+
+        # ── 按钮 ──
+        # ⚠ width=0 很关键：clam 主题给 TButton 预设了 -width -11，
+        #   意思是「11 个字符宽」，于是「自检」和「重新生成全部」都是 110px，
+        #   整条工具栏被凭空撑宽四成（1440 的屏放不下，右边按钮就点不到了）。
+        #   清零之后按钮按内容自适应。
+        style.configure("TButton", width=0, background=pal["field"], foreground=pal["text"],
+                        bordercolor=pal["border"], lightcolor=pal["field"],
+                        darkcolor=pal["field"], arrowcolor=pal["muted"])
+        style.map("TButton",
+                  background=[("disabled", pal["panel"]), ("pressed", pal["hover"]),
+                              ("active", pal["hover"])],
+                  foreground=[("disabled", pal["muted"])],
+                  bordercolor=[("active", pal["accent"])])
+        style.configure("Tool.TButton", width=0, background=pal["field"], foreground=pal["text"],
+                        bordercolor=pal["border"], lightcolor=pal["field"],
+                        darkcolor=pal["field"])
+        style.map("Tool.TButton",
+                  background=[("pressed", pal["hover"]), ("active", pal["hover"])])
+        style.configure("Accent.TButton", width=0, background=pal["accent"],
+                        foreground=pal["accent_text"],
+                        bordercolor=pal["accent"], lightcolor=pal["accent"],
+                        darkcolor=pal["accent"])
+        style.map("Accent.TButton",
+                  background=[("disabled", pal["muted"]), ("pressed", pal["accent_dark"]),
+                              ("active", pal["accent_dark"])],
+                  foreground=[("disabled", pal["panel"])])
+
+        style.configure("TMenubutton", width=0, background=pal["field"], foreground=pal["text"],
+                        bordercolor=pal["border"], arrowcolor=pal["muted"],
+                        lightcolor=pal["field"], darkcolor=pal["field"])
+        style.map("TMenubutton",
+                  background=[("pressed", pal["hover"]), ("active", pal["hover"])])
+
+        # ── 输入控件 ──
+        for name in ("TEntry", "TSpinbox"):
+            style.configure(name, fieldbackground=pal["field"], foreground=pal["text"],
+                            bordercolor=pal["border"], insertcolor=pal["text"],
+                            lightcolor=pal["border"], darkcolor=pal["border"],
+                            arrowcolor=pal["muted"])
+            style.map(name,
+                      bordercolor=[("focus", pal["accent"])],
+                      lightcolor=[("focus", pal["accent"])],
+                      darkcolor=[("focus", pal["accent"])],
+                      fieldbackground=[("disabled", pal["panel"])],
+                      foreground=[("disabled", pal["muted"])])
+
+        style.configure("TCombobox", fieldbackground=pal["field"], background=pal["field"],
+                        foreground=pal["text"], arrowcolor=pal["muted"],
+                        bordercolor=pal["border"], lightcolor=pal["border"],
+                        darkcolor=pal["border"], selectbackground=pal["field"],
+                        selectforeground=pal["text"], insertcolor=pal["text"])
+        style.map("TCombobox",
+                  fieldbackground=[("readonly", pal["field"]), ("disabled", pal["panel"])],
+                  foreground=[("readonly", pal["text"]), ("disabled", pal["muted"])],
+                  selectbackground=[("readonly", pal["field"]), ("disabled", pal["panel"])],
+                  selectforeground=[("readonly", pal["text"])],
+                  arrowcolor=[("disabled", pal["muted"])],
+                  bordercolor=[("focus", pal["accent"])],
+                  lightcolor=[("focus", pal["accent"])],
+                  darkcolor=[("focus", pal["accent"])])
+        # 下拉列表是 Tk 的 Listbox，不受 ttk 样式管，只能走 option 数据库
+        self.root.option_add("*TCombobox*Listbox.background", pal["field"])
+        self.root.option_add("*TCombobox*Listbox.foreground", pal["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", pal["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", pal["accent_text"])
+        self.root.option_add("*TCombobox*Listbox.borderWidth", 0)
+
+        style.configure("TCheckbutton", background=pal["panel"], foreground=pal["text"],
+                        indicatorcolor=pal["field"], focuscolor=pal["accent"])
+        style.map("TCheckbutton",
+                  background=[("active", pal["panel"])],
+                  indicatorcolor=[("selected", pal["accent"]), ("pressed", pal["accent_dark"]),
+                                  ("active", pal["field"])],
+                  foreground=[("disabled", pal["muted"])])
+
+        # ── 容器与滚动条 ──
+        style.configure("TPanedwindow", background=pal["bg"])
+        style.configure("Sash", background=pal["border"], sashthickness=8)
+        for name in ("TScrollbar", "Vertical.TScrollbar", "Horizontal.TScrollbar"):
+            style.configure(name, background=pal["hover"], troughcolor=pal["bg"],
+                            bordercolor=pal["bg"], arrowcolor=pal["muted"],
+                            lightcolor=pal["hover"], darkcolor=pal["hover"])
+            style.map(name, background=[("active", pal["muted"])])
+
+        # ── 弹出菜单 ──
+        for menu in self._menus:
+            menu.configure(background=pal["field"], foreground=pal["text"],
+                           activebackground=pal["accent"], activeforeground=pal["accent_text"],
+                           selectcolor=pal["accent"], disabledforeground=pal["muted"],
+                           borderwidth=0, relief="flat", activeborderwidth=0)
+
+        # ── tk 原生控件 ──
+        for widget in (self.body, self.summary_text, self.find_entry, self.replace_entry):
+            widget.configure(background=pal["editor_bg"], foreground=pal["editor_fg"],
+                             insertbackground=pal["text"],
+                             selectbackground=pal["select_bg"], selectforeground=pal["select_fg"])
+        self.body.tag_configure("curline", background=pal["curline"])
+        self.body.tag_configure("find", background=pal["find_bg"], foreground=pal["find_fg"])
+        self.body.tag_configure("find-current", background=pal["accent"],
+                                foreground=pal["accent_text"])
+        self.log_text.configure(background=pal["log_bg"], foreground=pal["text"],
+                                insertbackground=pal["text"])
+        for tag in ("ok", "warn", "err", "dim"):
+            self.log_text.tag_configure(tag, foreground=pal[tag])
+        if hasattr(self, "meta_canvas"):
+            self.meta_canvas.configure(background=pal["bg"])
+        for canvas, _refresh in self._scroll_rows:
+            canvas.configure(background=pal["bg"])
+
+        self.var_zoom.set(f"缩放 {round(self.zoom * 100)}%")
+
+    def set_theme(self, choice: str, announce: bool = True):
+        if choice not in ("light", "dark", "system"):
+            return
+        self.theme_choice = choice
+        self.var_theme.set(choice)
+        self.apply_theme()
+        if announce:
+            label = {"light": "亮色", "dark": "暗色", "system": "跟随系统"}[choice]
+            self.log(f"主题：{label}", "dim")
+            self.say(f"主题已切换到{label}")
+
+    def toggle_theme(self):
+        """在亮 / 暗之间来回切。当前是「跟随系统」时，切到与系统相反的那一套。"""
+        self.set_theme("light" if self._palette() is PALETTES["dark"] else "dark")
+
+    def _on_root_focus(self, _event=None):
+        """选了「跟随系统」时，窗口重新获得焦点就重新读一次系统设置"""
+        if self.theme_choice != "system":
+            return
+        if self._palette_id != id(self._palette()):
+            self.apply_theme()
+
+    # ══════════════════════════════════════════════════════════════════
+    #  缩放
+    # ══════════════════════════════════════════════════════════════════
+    def set_zoom(self, factor, announce: bool = True):
+        factor = max(ZOOM_MIN, min(ZOOM_MAX, round(float(factor), 2)))
+        self.zoom = factor
+        self._zoom_done = True
+        self._apply_fonts()
+        if announce:
+            self.log(f"缩放 {round(factor * 100)}%", "dim")
+        self.say(f"界面缩放 {round(factor * 100)}%")
+
+    def zoom_in(self):
+        self.set_zoom(self.zoom + ZOOM_STEP)
+
+    def zoom_out(self):
+        self.set_zoom(self.zoom - ZOOM_STEP)
+
+    def zoom_reset(self):
+        self.set_zoom(ZOOM_DEFAULT)
+
+    def _on_ctrl_wheel(self, event):
+        """Ctrl+滚轮缩放。Windows 的 delta 是 ±120 的整数倍。"""
+        self.set_zoom(self.zoom + (ZOOM_STEP if event.delta > 0 else -ZOOM_STEP))
+        return "break"
+
+    def _apply_fonts(self):
+        """按缩放倍数重设所有字体
+
+        tkinter 的字体是按「点」算的，缩放只能靠自己改字号。
+        ttk 的内边距是像素，字号变大后要跟着变大，否则按钮会显得很挤。
+        """
+        z = self.zoom
+
+        def size(base: int) -> int:
+            return max(7, round(base * z))
+
+        for name, base in (("TkDefaultFont", BASE_UI_SIZE), ("TkTextFont", BASE_UI_SIZE),
+                           ("TkMenuFont", BASE_UI_SIZE), ("TkHeadingFont", BASE_UI_SIZE),
+                           ("TkIconFont", BASE_UI_SIZE), ("TkTooltipFont", BASE_LOG_SIZE)):
+            try:
+                tkfont.nametofont(name).configure(family=self.ui_family, size=size(base))
+            except tk.TclError:
+                pass
+
+        self.body.configure(font=(self.editor_family if self.mono.get() else self.ui_family,
+                                  size(BASE_EDITOR_SIZE)),
+                            spacing1=max(1, round(1 * z)), spacing3=max(0, round(2 * z)))
+        self.summary_text.configure(font=(self.ui_family, size(BASE_SUMMARY_SIZE)))
+        self.log_text.configure(font=(self.editor_family, size(BASE_LOG_SIZE)))
+        for entry in (self.find_entry, self.replace_entry):
+            entry.configure(font=(self.ui_family, size(BASE_UI_SIZE)))
+
+        style = ttk.Style(self.root)
+        style.configure("TButton", padding=(round(9 * z), round(4 * z)))
+        style.configure("Tool.TButton", padding=(round(8 * z), round(3 * z)))
+        style.configure("Accent.TButton", padding=(round(11 * z), round(4 * z)))
+        style.configure("TMenubutton", padding=(round(9 * z), round(4 * z)))
+
+        self.var_zoom.set(f"缩放 {round(z * 100)}%")
+        self._sync_pane_width()
+        self._sync_minsize()
+        self._refresh_scroll_rows()
+
+    def _sync_minsize(self):
+        """窗口最小尺寸跟着内容走，必要时把窗口撑大
+
+        工具栏是一整排按钮，缩放变大后如果窗口还能缩得比工具栏窄，
+        最右边的按钮就会被裁掉、点不到。这里让最小宽度始终 = 工具栏所需宽度。
+        而且 wm minsize 只约束「以后」的缩放，不会把已经显示出来的窗口顶大，
+        所以还得主动 geometry 一次 —— 否则 150% 下窗口纹丝不动，右边照样被切。
+        """
+        self.root.update_idletasks()
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        need_w = min(self.toolbar.winfo_reqwidth() + 32, screen_w - 20)
+        need_h = min(560 + (self.log_frame.winfo_reqheight() if self.log_visible else 0),
+                     screen_h - 60)
+        self.root.minsize(need_w, need_h)
+
+        # 窗口还没映射出来时不碰它：那时 winfo_width() 是 1，
+        # 会把 _restore_state 里刚恢复的窗口尺寸覆盖掉
+        if not self.root.winfo_ismapped():
+            return
+        width, height = self.root.winfo_width(), self.root.winfo_height()
+        if width >= need_w and height >= need_h:
+            return
+
+        new_w, new_h = max(width, need_w), max(height, need_h)
+        x, y = self.root.winfo_x(), self.root.winfo_y()
+        # 撑大之后必须把位置夹回屏幕内：窗口是从左上角向右下「长」的，
+        # 原本靠右的窗口撑大后会把右半截伸到屏幕外 —— 用户看不见也点不到，
+        # 看起来就像那排按钮凭空消失了。
+        x = max(0, min(x, max(0, screen_w - new_w)))
+        y = max(0, min(y, max(0, screen_h - new_h)))
+        self.root.geometry(f"{new_w}x{new_h}+{x}+{y}")
+
+    def _sync_pane_width(self):
+        """左栏宽度跟着缩放走
+
+        缩放只改字号，ttk 控件的固定像素宽度不会自动变，于是 150% 时左栏还是
+        420px，元数据的输入框和提示文字会被横着切掉一半。
+        """
+        if not hasattr(self, "paned"):
+            return
+        try:
+            total = self.paned.winfo_width()
+        except tk.TclError:
+            return
+        if total < 200:
+            return          # 还没映射，交给初始宽度
+        wanted = int(META_WIDTH_BASE * self.zoom)
+        # 正文那一栏至少留 380px；实在放不下就宁可压左栏
+        wanted = min(wanted, max(240, total - 380))
+        try:
+            self.paned.sashpos(0, wanted)
+        except tk.TclError:
+            pass
+
+    # ══════════════════════════════════════════════════════════════════
+    #  界面搭建
+    # ══════════════════════════════════════════════════════════════════
     def _setup_fonts(self):
-        """统一字体。tk 默认字体在中文 Windows 上是宋体，标题和正文都难看。"""
+        """挑字体。tk 默认字体在中文 Windows 上是宋体，标题和正文都难看。"""
         family = "Microsoft YaHei UI"
         available = set(tkfont.families(self.root))
         if family not in available:
             family = "Microsoft YaHei" if "Microsoft YaHei" in available else "Segoe UI"
-        for name, size in (("TkDefaultFont", 10), ("TkTextFont", 10), ("TkMenuFont", 10)):
-            try:
-                tkfont.nametofont(name).configure(family=family, size=size)
-            except tk.TclError:
-                pass
         self.ui_family = family
         self.editor_family = "Consolas" if "Consolas" in available else "Courier New"
 
@@ -415,46 +888,102 @@ class WritepadApp:
         # clam 下按钮才有正常的 padding 和主题色，Windows 原生主题不认 Accent
         if "clam" in style.theme_names():
             style.theme_use("clam")
-        style.configure("Accent.TButton", foreground="#ffffff", background="#3B82F6")
-        style.map("Accent.TButton",
-                  background=[("active", "#2563EB"), ("disabled", "#93C5FD")])
-        style.configure("Tool.TButton", padding=(8, 3))
-        style.configure("Group.TLabelframe.Label", foreground="#374151")
 
     def _build_ui(self):
         self.root.title("科研记录写字板 —— research.who-young.top")
-        self.root.minsize(1100, 680)
 
         self._build_toolbar()
 
-        # pack 的顺序决定分配顺序：先把底部两条占掉，剩下的都给正文区
-        self._build_statusbar()
-        self._build_log()
+        # 底部一整块：日志面板 + 状态栏。做成一整块是为了让「折叠日志」
+        # 只在块内增删控件，不动根窗口的 pack 顺序（否则会抢不到空间）。
+        self.bottom = ttk.Frame(self.root)
+        self.bottom.pack(side="bottom", fill="x")
+        self._build_log(self.bottom)
+        self._build_statusbar(self.bottom)
 
         paned = ttk.PanedWindow(self.root, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=10, pady=(0, 8))
+        self.paned = paned
 
-        left = ttk.Frame(paned, width=420)
+        left = ttk.Frame(paned, width=META_WIDTH_BASE)
         right = ttk.Frame(paned)
         paned.add(left, weight=0)
         paned.add(right, weight=1)
         self._build_meta_panel(left)
         self._build_editor(right)
 
+    def _scroll_row(self, parent, padding=(0, 0, 0, 0), pady=(0, 0)) -> ttk.Frame:
+        """把一条横向工具栏放进可横向滚动的 Canvas，返回装按钮的内容 Frame
+
+        为什么非做不可：缩放调大之后，一排按钮的总宽度可能超过屏幕本身
+        （1440 的屏在 150% 下要 ~1545px），而左栏又跟着缩放一起变宽、
+        右栏反而更窄 —— 光靠撑大窗口解决不了。被裁掉的按钮是点不到的，
+        功能等于凭空消失，所以放不下时给滚动条，而不是裁掉。
+        """
+        # Canvas 与滚动条放进一个自成一体的容器里，再整体 pack 给父级：
+        # 否则滚动条是父级的直接子节点，pack 顺序排在会 expand 的正文框之后，
+        # 需要滚动时它根本抢不到高度，等于没有。
+        container = ttk.Frame(parent)
+        container.pack(fill="x", pady=pady)
+
+        canvas = tk.Canvas(container, highlightthickness=0, borderwidth=0, height=36)
+        hbar = ttk.Scrollbar(container, orient="horizontal", command=canvas.xview)
+        canvas.configure(xscrollcommand=hbar.set)
+        canvas.pack(fill="x")
+
+        inner = ttk.Frame(canvas, padding=padding)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+
+        def refresh(_event=None):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            height = max(inner.winfo_reqheight(), 24)
+            if int(float(canvas.cget("height"))) != height:
+                canvas.configure(height=height)
+            have = canvas.winfo_width()
+            if have < 50:
+                return          # 还没排过版，等下一次 Configure 再决定
+            # 用 winfo_manager() 判断「是否被 pack 管理」而不是 winfo_ismapped()：
+            # 父窗口还没显示出来时 ismapped() 恒为 0，隐藏分支就永远不会执行，
+            # 滚动条会在布局初期被 pack 上去然后一直赖着不走。
+            managed = bool(hbar.winfo_manager())
+            if inner.winfo_reqwidth() > have + 4:
+                if not managed:
+                    hbar.pack(fill="x", side="bottom")
+            elif managed:
+                hbar.pack_forget()
+                canvas.xview_moveto(0)
+
+        inner.bind("<Configure>", refresh)
+        canvas.bind("<Configure>", refresh)
+        self._scroll_rows.append((canvas, refresh))
+        return inner
+
+    def _refresh_scroll_rows(self):
+        """字号变了之后，滚动区域和滚动条的有无都要重新算"""
+        for canvas, refresh in self._scroll_rows:
+            try:
+                refresh()
+            except tk.TclError:
+                pass
+
     def _build_toolbar(self):
-        bar = ttk.Frame(self.root, padding=(10, 8, 10, 6))
-        bar.pack(fill="x")
+        host = ttk.Frame(self.root)
+        host.pack(fill="x")
+        self.toolbar_host = host
+
+        bar = self._scroll_row(host, padding=(10, 8, 10, 6))
+        self.toolbar = bar
 
         ttk.Label(bar, text="项目").pack(side="left")
         self.project_box = ttk.Combobox(bar, textvariable=self.var_project, state="readonly",
-                                        width=34, values=[])
+                                        width=28, values=[])
         self.project_box.pack(side="left", padx=(6, 10))
         self.project_box.bind("<<ComboboxSelected>>", lambda _e: self.on_pick_project())
 
         ttk.Button(bar, text="新建", style="Tool.TButton", command=self.on_new).pack(side="left")
         ttk.Button(bar, text="删除", style="Tool.TButton", command=self.on_delete).pack(side="left", padx=4)
 
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
 
         ttk.Button(bar, text="保存", style="Accent.TButton", command=self.on_save).pack(side="left")
         ttk.Button(bar, text="生成此页", style="Tool.TButton",
@@ -462,56 +991,136 @@ class WritepadApp:
         ttk.Button(bar, text="重新生成全部", style="Tool.TButton",
                    command=self.on_build_all).pack(side="left")
 
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
 
         ttk.Button(bar, text="预览", style="Tool.TButton", command=self.on_preview).pack(side="left")
-        ttk.Button(bar, text="预览首页", style="Tool.TButton",
-                   command=self.on_preview_index).pack(side="left", padx=4)
-        ttk.Button(bar, text="自检", style="Tool.TButton", command=self.on_check).pack(side="left")
+        ttk.Button(bar, text="自检", style="Tool.TButton", command=self.on_check).pack(side="left", padx=4)
 
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=10)
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
 
-        ttk.Button(bar, text="打开输出目录", style="Tool.TButton",
-                   command=self.on_open_folder).pack(side="left")
-        ttk.Button(bar, text="站点设置", style="Tool.TButton",
-                   command=self.on_settings).pack(side="left", padx=4)
+        # 「视图」与「更多」收进下拉菜单：一是让工具栏在最小窗口下也放得下，
+        # 二是这些操作不常用，摊平了反而找不到重点。
+        self.view_button = ttk.Menubutton(bar, text="视图 ▾", style="TMenubutton")
+        self.view_menu = tk.Menu(self.view_button, tearoff=0)
+        self._build_view_menu()
+        self.view_button.configure(menu=self.view_menu)
+        self.view_button.pack(side="left")
 
-    def _build_statusbar(self):
-        bar = ttk.Frame(self.root, padding=(12, 4))
+        self.more_button = ttk.Menubutton(bar, text="更多 ▾", style="TMenubutton")
+        self.more_menu = tk.Menu(self.more_button, tearoff=0)
+        self.more_menu.add_command(label="打开输出目录", command=self.on_open_folder)
+        self.more_menu.add_command(label="站点设置…", command=self.on_settings)
+        self.more_menu.add_separator()
+        self.more_menu.add_command(label="快捷键…", command=self.on_shortcuts)
+        self.more_menu.add_command(label="生成核心自检", command=self.on_check)
+        self.more_button.configure(menu=self.more_menu)
+        self.more_button.pack(side="left", padx=(4, 0))
+        # 主题切换时要重新给菜单配色，这里登记全部菜单
+        self._menus.append(self.more_menu)
+
+    def _build_view_menu(self):
+        menu = self.view_menu
+        menu.delete(0, "end")
+
+        theme_menu = tk.Menu(menu, tearoff=0)
+        for value, label in (("light", "亮色"), ("dark", "暗色"), ("system", "跟随系统")):
+            theme_menu.add_radiobutton(label=label, value=value, variable=self.var_theme,
+                                       command=lambda v=value: self.set_theme(v))
+        menu.add_cascade(label="主题", menu=theme_menu)
+
+        menu.add_separator()
+        menu.add_command(label="放大", accelerator="Ctrl+=", command=self.zoom_in)
+        menu.add_command(label="缩小", accelerator="Ctrl+-", command=self.zoom_out)
+        menu.add_command(label="恢复 100%", accelerator="Ctrl+0", command=self.zoom_reset)
+        menu.add_separator()
+        self.var_log_menu = tk.BooleanVar(value=self.log_visible)
+        menu.add_checkbutton(label="显示运行日志面板", accelerator="Ctrl+L",
+                             variable=self.var_log_menu, command=self.toggle_log)
+        self.var_fullscreen = tk.BooleanVar(value=False)
+        menu.add_checkbutton(label="全屏", accelerator="F11",
+                             variable=self.var_fullscreen, command=self.toggle_fullscreen)
+
+        self._menus = [self.view_menu, theme_menu]
+
+    def _build_statusbar(self, parent):
+        bar = ttk.Frame(parent, padding=(12, 4))
         bar.pack(side="bottom", fill="x")
-        ttk.Label(bar, textvariable=self.var_statusbar).pack(side="left")
-        ttk.Label(bar, textvariable=self.var_counts, foreground="#6B7280").pack(side="right")
+        self.status_bar = bar
 
-    def _build_log(self):
-        frame = ttk.LabelFrame(self.root, text="运行日志", style="Group.TLabelframe",
-                               padding=(8, 4, 8, 6))
-        frame.pack(side="bottom", fill="x", padx=10, pady=(0, 4))
+        # 右边的字数 / 行列 / 缩放先 pack（它们更重要），左边那句状态提示最后 pack。
+        # pack 是按调用顺序分配空间的，所以位置不够时被压缩的是左边那句，
+        # 而不是把最右边的「缩放 150%」切掉。
+        ttk.Label(bar, textvariable=self.var_zoom, style="Status.TLabel").pack(side="right")
+        ttk.Label(bar, text="·", style="Status.TLabel").pack(side="right", padx=8)
+        ttk.Label(bar, textvariable=self.var_cursor, style="Status.TLabel").pack(side="right")
+        ttk.Label(bar, text="·", style="Status.TLabel").pack(side="right", padx=8)
+        ttk.Label(bar, textvariable=self.var_counts, style="Status.TLabel").pack(side="right")
+        self.status_hint = ttk.Label(bar, textvariable=self.var_statusbar, style="Status.TLabel")
+        self.status_hint.pack(side="left")
 
-        wrap = ttk.Frame(frame)
+    def _build_log(self, parent):
+        self.log_frame = ttk.LabelFrame(parent, text="运行日志", style="Group.TLabelframe",
+                                        padding=(8, 4, 8, 6))
+        self.log_frame.pack(fill="x", padx=10, pady=(0, 4))
+
+        wrap = ttk.Frame(self.log_frame)
         wrap.pack(fill="both", expand=True)
         self.log_text = tk.Text(wrap, height=7, wrap="none", relief="flat",
-                                background="#F8FAFC", foreground="#334155",
-                                font=(self.editor_family, 9))
+                                borderwidth=0, font=(self.editor_family, BASE_LOG_SIZE))
         scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.log_text.yview)
         self.log_text.configure(yscrollcommand=scroll.set, state="disabled")
         self.log_text.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        self.log_text.tag_configure("ok", foreground="#047857")
-        self.log_text.tag_configure("warn", foreground="#B45309")
-        self.log_text.tag_configure("err", foreground="#B91C1C")
-        self.log_text.tag_configure("dim", foreground="#94A3B8")
-
-    # ── 左侧：元数据 ─────────────────────────────────────────────────────
     def _build_meta_panel(self, parent):
-        frame = ttk.LabelFrame(parent, text="项目元数据", style="Group.TLabelframe",
+        """左栏：项目元数据
+
+        整栏放在一个可滚动的 Canvas 里 —— 字段有十几行，缩放调到 150% 以上
+        或者窗口拉矮时，固定布局会被截断、底下的字段根本够不着。
+        """
+        outer = ttk.Frame(parent)
+        outer.pack(fill="both", expand=True, padx=(0, 8))
+
+        self.meta_canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        scroll = ttk.Scrollbar(outer, orient="vertical", command=self.meta_canvas.yview)
+        self.meta_canvas.configure(yscrollcommand=scroll.set)
+        self.meta_canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        frame = ttk.LabelFrame(self.meta_canvas, text="项目元数据", style="Group.TLabelframe",
                                padding=(12, 8, 12, 12))
-        frame.pack(fill="both", expand=True, padx=(0, 8))
+        window = self.meta_canvas.create_window((0, 0), window=frame, anchor="nw")
         frame.columnconfigure(1, weight=1)
+
+        def on_frame_configure(_event=None):
+            self.meta_canvas.configure(scrollregion=self.meta_canvas.bbox("all"))
+
+        def on_canvas_configure(event):
+            self.meta_canvas.itemconfigure(window, width=event.width)
+
+        frame.bind("<Configure>", on_frame_configure)
+        self.meta_canvas.bind("<Configure>", on_canvas_configure)
+
+        # 滚轮只在指针位于这一栏时接管；移出去就还回去，免得抢了正文的滚动
+        def grab_wheel(_event=None):
+            self.meta_canvas.bind_all(
+                "<MouseWheel>",
+                lambda e: self.meta_canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
+
+        def release_wheel(_event=None):
+            self.meta_canvas.unbind_all("<MouseWheel>")
+
+        self.meta_canvas.bind("<Enter>", grab_wheel)
+        self.meta_canvas.bind("<Leave>", release_wheel)
+
         row = 0
 
         def add_label(text, r):
             ttk.Label(frame, text=text).grid(row=r, column=0, sticky="w", pady=3)
+
+        def add_hint(text, r):
+            ttk.Label(frame, text=text, style="Muted.TLabel").grid(
+                row=r, column=1, columnspan=2, sticky="w")
 
         add_label("标题", row)
         ttk.Entry(frame, textvariable=self.var_title).grid(row=row, column=1, columnspan=2,
@@ -522,8 +1131,7 @@ class WritepadApp:
         ttk.Entry(frame, textvariable=self.var_slug).grid(row=row, column=1, columnspan=2,
                                                           sticky="ew", pady=3)
         row += 1
-        ttk.Label(frame, text="改这里等于改目录名和网址，保存时生效",
-                  foreground="#9CA3AF").grid(row=row, column=1, columnspan=2, sticky="w")
+        add_hint("改这里等于改目录名和网址，保存时生效", row)
         row += 1
 
         add_label("创建日期", row)
@@ -537,6 +1145,7 @@ class WritepadApp:
         ttk.Button(frame, text="今天", style="Tool.TButton",
                    command=lambda: self.var_updated.set(core.today())).grid(row=row, column=2, sticky="w")
         row += 1
+
         ttk.Checkbutton(frame, text="保存时把「更新」设为今天", variable=self.auto_update).grid(
             row=row, column=1, columnspan=2, sticky="w")
         row += 1
@@ -566,17 +1175,15 @@ class WritepadApp:
         ttk.Entry(frame, textvariable=self.var_tags).grid(row=row, column=1, columnspan=2,
                                                           sticky="ew", pady=3)
         row += 1
-        ttk.Label(frame, text="用逗号分隔，例如：薄膜, XRD, 退火",
-                  foreground="#9CA3AF").grid(row=row, column=1, columnspan=2, sticky="w")
+        add_hint("用逗号分隔，例如：薄膜, XRD, 退火", row)
         row += 1
 
         add_label("摘要", row)
         self.summary_text = tk.Text(frame, height=4, wrap="word", relief="solid", borderwidth=1,
-                                    font=(self.ui_family, 10), padx=6, pady=4)
+                                    padx=6, pady=4)
         self.summary_text.grid(row=row, column=1, columnspan=2, sticky="ew", pady=3)
         row += 1
-        ttk.Label(frame, text="显示在首页卡片上，一两句话即可",
-                  foreground="#9CA3AF").grid(row=row, column=1, columnspan=2, sticky="w")
+        add_hint("显示在首页卡片上，一两句话即可", row)
         row += 1
 
         add_label("封面图", row)
@@ -591,17 +1198,14 @@ class WritepadApp:
         ttk.Checkbutton(frame, text="置顶", variable=self.var_pinned).grid(
             row=row, column=2, sticky="w", padx=(4, 0))
         row += 1
-        ttk.Label(frame, text="数字小的排前面；勾了置顶的排在最前",
-                  foreground="#9CA3AF").grid(row=row, column=1, columnspan=2, sticky="w")
+        add_hint("数字小的排前面；勾了置顶的排在最前", row)
 
         for var in (self.var_title, self.var_slug, self.var_date, self.var_updated,
                     self.var_tags, self.var_cover, self.var_order):
             var.trace_add("write", lambda *_a: self.mark_dirty())
         self.summary_text.bind("<<Modified>>", self._on_summary_modified)
-        self.var_pinned.trace_add("write", lambda *_a: self.mark_dirty())
-        self.var_status.trace_add("write", lambda *_a: self.mark_dirty())
-        self.var_icon.trace_add("write", lambda *_a: self.mark_dirty())
-        self.var_color.trace_add("write", lambda *_a: self.mark_dirty())
+        for var in (self.var_pinned, self.var_status, self.var_icon, self.var_color):
+            var.trace_add("write", lambda *_a: self.mark_dirty())
         self.var_date.trace_add("write", lambda *_a: self._sync_date_display())
 
     def _on_summary_modified(self, _event=None):
@@ -616,67 +1220,402 @@ class WritepadApp:
         if not self.var_updated.get().strip():
             self.var_updated.set(self.var_date.get().strip())
 
-    # ── 右侧：正文 ───────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  右侧：正文
+    # ══════════════════════════════════════════════════════════════════
     def _build_editor(self, parent):
         frame = ttk.LabelFrame(parent, text="正文（Markdown）", style="Group.TLabelframe",
                                padding=(10, 6, 10, 10))
         frame.pack(fill="both", expand=True)
+        self.editor_frame = frame
 
-        tools = ttk.Frame(frame)
-        tools.pack(fill="x", pady=(0, 6))
-        buttons = [
+        tools = self._scroll_row(frame, pady=(0, 6))
+
+        # 靠右的这个先 pack：pack 是按调用顺序分配空间的，排在后面又靠右的控件
+        # 会被左边那一排按钮挤成零宽 —— 「等宽」原本就是这么消失的
+        ttk.Checkbutton(tools, text="等宽", variable=self.mono,
+                        command=self.apply_editor_font).pack(side="right")
+
+        # 高频的摊在外面，低频的收进「插入 ▾」——
+        # 十六个按钮平铺会超出右栏宽度，末尾几个根本点不到
+        for text, command in (
             ("二级标题", lambda: self.insert_block("## ", "", "小节标题")),
             ("三级标题", lambda: self.insert_block("### ", "", "小小节标题")),
             ("加粗", lambda: self.wrap_sel("**", "**", "加粗文字")),
             ("斜体", lambda: self.wrap_sel("*", "*", "斜体文字")),
             ("行内代码", lambda: self.wrap_sel("`", "`", "code")),
-            ("代码块", self.insert_code_block),
-            ("表格", self.insert_table),
-            ("图片", self.insert_image),
-            ("图注", self.insert_figure_caption),
             ("引用", lambda: self.insert_block("> ", "", "引用文字")),
             ("列表", lambda: self.insert_block("- ", "", "列表项")),
-            ("有序列表", lambda: self.insert_block("1. ", "", "列表项")),
             ("任务", lambda: self.insert_block("- [ ] ", "", "待办事项")),
-            ("链接", self.insert_link),
-            ("分隔线", lambda: self.insert_block("\n---\n", "", "")),
-            ("Mermaid", self.insert_mermaid),
-        ]
-        for text, command in buttons:
+        ):
             ttk.Button(tools, text=text, style="Tool.TButton", command=command).pack(side="left", padx=1)
 
-        ttk.Checkbutton(tools, text="等宽", variable=self.mono,
-                        command=self.apply_editor_font).pack(side="right")
+        self.insert_button = ttk.Menubutton(tools, text="插入 ▾", style="TMenubutton")
+        insert_menu = tk.Menu(self.insert_button, tearoff=0)
+        insert_menu.add_command(label="代码块", command=self.insert_code_block)
+        insert_menu.add_command(label="表格", command=self.insert_table)
+        insert_menu.add_separator()
+        insert_menu.add_command(label="图片…", command=self.insert_image)
+        insert_menu.add_command(label="图注怎么写…", command=self.insert_figure_caption)
+        insert_menu.add_command(label="Mermaid 图表", command=self.insert_mermaid)
+        insert_menu.add_separator()
+        insert_menu.add_command(label="链接", accelerator="Ctrl+K", command=self.insert_link)
+        insert_menu.add_command(label="分隔线", command=lambda: self.insert_block("\n---\n", "", ""))
+        self.insert_button.configure(menu=insert_menu)
+        self.insert_button.pack(side="left", padx=(6, 1))
+
+        ttk.Button(tools, text="查找", style="Tool.TButton",
+                   command=self.on_find).pack(side="left", padx=(6, 1))
+
+        self._build_find_bar(frame)
 
         wrap = ttk.Frame(frame)
         wrap.pack(fill="both", expand=True)
+        self.editor_wrap = wrap
         self.body = tk.Text(wrap, wrap="word", undo=True, maxundo=-1, autoseparators=True,
-                            relief="solid", borderwidth=1, padx=10, pady=8,
-                            insertbackground="#1E293B")
+                            relief="solid", borderwidth=1, padx=10, pady=8)
         scroll = ttk.Scrollbar(wrap, orient="vertical", command=self.body.yview)
         self.body.configure(yscrollcommand=scroll.set)
         self.body.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
         self.body.bind("<<Modified>>", self._on_body_modified)
+        self.body.bind("<KeyRelease>", self._on_cursor_move)
+        self.body.bind("<ButtonRelease-1>", self._on_cursor_move)
+        self.body.bind("<FocusIn>", self._on_cursor_move)
+        self.body.bind("<Control-MouseWheel>", self._on_ctrl_wheel)
         self.apply_editor_font()
 
+    def _build_find_bar(self, parent):
+        """查找替换条：默认不显示，Ctrl+F 才出来"""
+        bar = ttk.Frame(parent)
+        self.find_bar = bar
+
+        # 关闭按钮先 pack 并且靠右 —— 同样是为了不被前面的控件挤掉：
+        # 缩放调大之后这一行会变宽，最右边的关闭按钮必须始终够得着
+        ttk.Button(bar, text="✕", style="Tool.TButton",
+                   command=self.close_find).pack(side="right")
+
+        ttk.Label(bar, text="查找").pack(side="left")
+        self.find_entry = tk.Entry(bar, textvariable=self.find_var, width=16, relief="solid",
+                                   borderwidth=1)
+        self.find_entry.pack(side="left", padx=(4, 4))
+        ttk.Button(bar, text="下一个", style="Tool.TButton",
+                   command=lambda: self.find_next(True)).pack(side="left")
+        ttk.Button(bar, text="上一个", style="Tool.TButton",
+                   command=lambda: self.find_next(False)).pack(side="left", padx=2)
+        ttk.Checkbutton(bar, text="忽略大小写", variable=self.find_nocase,
+                        command=self._highlight_matches).pack(side="left", padx=(6, 8))
+
+        ttk.Label(bar, text="替换为").pack(side="left")
+        self.replace_entry = tk.Entry(bar, textvariable=self.replace_var, width=16,
+                                      relief="solid", borderwidth=1)
+        self.replace_entry.pack(side="left", padx=(4, 4))
+        ttk.Button(bar, text="替换", style="Tool.TButton",
+                   command=self.replace_one).pack(side="left")
+        ttk.Button(bar, text="全部替换", style="Tool.TButton",
+                   command=self.replace_all).pack(side="left", padx=2)
+
+        self.var_find_info.set("")
+        ttk.Label(bar, textvariable=self.var_find_info, style="Muted.TLabel").pack(
+            side="left", padx=(8, 0))
+
+        self.find_var.trace_add("write", lambda *_a: self._highlight_matches())
+        self.find_entry.bind("<Return>", lambda _e: (self.find_next(True), "break")[1])
+        self.find_entry.bind("<Escape>", lambda _e: (self.close_find(), "break")[1])
+        self.replace_entry.bind("<Return>", lambda _e: (self.replace_one(), "break")[1])
+        self.replace_entry.bind("<Escape>", lambda _e: (self.close_find(), "break")[1])
+
     def apply_editor_font(self):
-        family = self.editor_family if self.mono.get() else self.ui_family
-        size = 10 if self.mono.get() else 11
-        self.body.configure(font=(family, size), spacing1=1, spacing3=3)
+        self._apply_fonts()
 
-    # ── 快捷键 ───────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  查找 / 替换
+    # ══════════════════════════════════════════════════════════════════
+    def on_find(self):
+        if self.find_bar.winfo_ismapped():
+            self.find_entry.focus_set()
+            self.find_entry.select_range(0, "end")
+            return
+        self.find_bar.pack(fill="x", pady=(0, 6), before=self.editor_wrap)
+        self.find_entry.focus_set()
+        if self._has_selection():
+            selected = self.body.get(tk.SEL_FIRST, tk.SEL_LAST)
+            if "\n" not in selected:
+                self.find_var.set(selected)
+        self._highlight_matches()
+
+    def close_find(self):
+        if self.find_bar.winfo_ismapped():
+            self.find_bar.pack_forget()
+        self.body.tag_remove("find", "1.0", "end")
+        self.body.tag_remove("find-current", "1.0", "end")
+        self.var_find_info.set("")
+        self.body.focus_set()
+
+    def _matches(self) -> list[tuple[str, str]]:
+        needle = self.find_var.get()
+        if not needle:
+            return []
+        nocase = bool(self.find_nocase.get())
+        out: list[tuple[str, str]] = []
+        index = self.body.search(needle, "1.0", stopindex="end", nocase=nocase)
+        while index:
+            end = f"{index}+{len(needle)}c"
+            out.append((index, end))
+            index = self.body.search(needle, end, stopindex="end", nocase=nocase)
+            if len(out) > 5000:      # 兜底：别为了高亮把界面卡死
+                break
+        return out
+
+    def _highlight_matches(self):
+        self.body.tag_remove("find", "1.0", "end")
+        self.body.tag_remove("find-current", "1.0", "end")
+        if not self.find_bar.winfo_ismapped():
+            return
+        matches = self._matches()
+        for start, end in matches:
+            self.body.tag_add("find", start, end)
+        # 当前焦点所在的那个匹配单独上色
+        cursor = self.body.index("insert")
+        for start, end in matches:
+            if self.body.compare(start, "<=", cursor) and self.body.compare(cursor, "<=", end):
+                self.body.tag_add("find-current", start, end)
+                break
+        self.body.tag_raise("find")
+        self.body.tag_raise("find-current")
+        self.var_find_info.set(f"{len(matches)} 处" if matches else "没找到")
+
+    def find_next(self, forward: bool = True):
+        """跳到下一个 / 上一个匹配
+
+        按【匹配下标】导航，而不是比较光标位置：光标在匹配内部或正好停在
+        匹配末尾时，位置比较会把它自己也当成「光标之前的一处」，
+        于是在第一处按 Shift+F3 不会绕回最后一处，而是原地不动。
+        先定位光标当前落在第几处，再 ±1 取模，行为就和常见编辑器一致了。
+        """
+        matches = self._matches()
+        if not matches:
+            self._highlight_matches()
+            self.say("没找到")
+            return
+
+        cursor = self.body.index("insert")
+        needle_len = len(self.find_var.get())
+        current = None
+        for index, (start, end) in enumerate(matches):
+            if self.body.compare(start, "<=", cursor) and self.body.compare(cursor, "<=", end):
+                current = index
+                break
+
+        if current is None:
+            # 光标不在任何匹配里：向前取光标之后的第一个，向后取光标之前的最后一个
+            ahead = [i for i, (start, _e) in enumerate(matches) if self.body.compare(start, ">", cursor)]
+            behind = [i for i, (start, _e) in enumerate(matches) if self.body.compare(start, "<", cursor)]
+            if forward:
+                target_index = ahead[0] if ahead else 0
+            else:
+                target_index = behind[-1] if behind else len(matches) - 1
+        else:
+            target_index = (current + 1) % len(matches) if forward else (current - 1) % len(matches)
+
+        target = matches[target_index][0]
+        end = f"{target}+{needle_len}c"
+
+        # 找到之后要【选中】这一段，并把光标放到末尾：
+        #   · 选中了「替换」才有东西可换（否则它只能一直往后跳）
+        #   · 光标落在末尾，正好落在这处匹配的范围内，下一次导航才会继续往后
+        self.body.mark_set("insert", end)
+        self.body.tag_remove(tk.SEL, "1.0", "end")
+        self.body.tag_add(tk.SEL, target, end)
+        self.body.see(target)
+        self.body.tag_remove("find-current", "1.0", "end")
+        self.body.tag_add("find-current", target, end)
+        self.body.tag_raise("find-current")
+        self._update_cursor_pos()
+        self.say(f"第 {target_index + 1} / {len(matches)} 处")
+
+    def replace_one(self):
+        needle = self.find_var.get()
+        if not needle:
+            return
+        try:
+            start, end = self.body.index(tk.SEL_FIRST), self.body.index(tk.SEL_LAST)
+        except tk.TclError:
+            start = end = None
+        # 只有当前正好选中这个匹配时才替换，否则先跳过去（和多数编辑器一致）
+        if not start or self.body.get(start, end) != needle:
+            self.find_next(True)
+            return
+        self.body.edit_separator()
+        self.body.delete(start, end)
+        self.body.insert(start, self.replace_var.get())
+        self.body.edit_separator()
+        self.body.mark_set("insert", f"{start}+{len(self.replace_var.get())}c")
+        self.find_next(True)
+        self._highlight_matches()
+
+    def replace_all(self):
+        needle = self.find_var.get()
+        if not needle:
+            return
+        matches = self._matches()
+        if not matches:
+            self.say("没找到")
+            return
+        replacement = self.replace_var.get()
+        self.body.edit_separator()
+        # 从后往前替换，前面的下标才不会因为长度变化而失效
+        for start, end in reversed(matches):
+            self.body.delete(start, end)
+            self.body.insert(start, replacement)
+        self.body.edit_separator()
+        self.mark_dirty()
+        self._highlight_matches()
+        self.var_find_info.set(f"替换了 {len(matches)} 处")
+        self.log(f"全部替换：{len(matches)} 处「{needle}」→「{replacement}」", "warn")
+        self.say(f"替换了 {len(matches)} 处")
+
+    # ══════════════════════════════════════════════════════════════════
+    #  快捷键
+    # ══════════════════════════════════════════════════════════════════
     def _bind_keys(self):
-        self.root.bind("<Control-s>", lambda _e: (self.on_save(), "break")[1])
-        self.root.bind("<Control-S>", lambda _e: (self.on_save(), "break")[1])
-        self.root.bind("<Control-Return>", lambda _e: (self.on_build_current(), "break")[1])
-        self.root.bind("<F5>", lambda _e: (self.on_preview(), "break")[1])
-        self.root.bind("<Control-b>", lambda _e: (self.wrap_sel("**", "**", "加粗文字"), "break")[1])
-        self.root.bind("<Control-i>", lambda _e: (self.wrap_sel("*", "*", "斜体文字"), "break")[1])
-        self.root.bind("<Control-k>", lambda _e: (self.insert_link(), "break")[1])
+        def bind(sequence, handler):
+            self.root.bind(sequence, handler)
 
-    # ── 状态与日志 ───────────────────────────────────────────────────────
+        bind("<Control-s>", lambda _e: (self.on_save(), "break")[1])
+        bind("<Control-S>", lambda _e: (self.on_save(), "break")[1])
+        bind("<Control-n>", lambda _e: (self.on_new(), "break")[1])
+        bind("<Control-Return>", lambda _e: (self.on_build_current(), "break")[1])
+        bind("<F5>", lambda _e: (self.on_preview(), "break")[1])
+        bind("<Control-f>", lambda _e: (self.on_find(), "break")[1])
+        bind("<F3>", lambda _e: (self.find_next(True), "break")[1])
+        bind("<Shift-F3>", lambda _e: (self.find_next(False), "break")[1])
+        bind("<Control-b>", lambda _e: (self.wrap_sel("**", "**", "加粗文字"), "break")[1])
+        bind("<Control-i>", lambda _e: (self.wrap_sel("*", "*", "斜体文字"), "break")[1])
+        bind("<Control-k>", lambda _e: (self.insert_link(), "break")[1])
+        bind("<Control-t>", lambda _e: (self.toggle_theme(), "break")[1])
+        bind("<Control-l>", lambda _e: (self.toggle_log(), "break")[1])
+        bind("<F11>", lambda _e: (self.toggle_fullscreen(), "break")[1])
+        # 缩放：等号与加号都要认，小键盘的加减也认
+        for sequence in ("<Control-equal>", "<Control-plus>", "<Control-KP_Add>"):
+            bind(sequence, lambda _e: (self.zoom_in(), "break")[1])
+        for sequence in ("<Control-minus>", "<Control-KP_Subtract>"):
+            bind(sequence, lambda _e: (self.zoom_out(), "break")[1])
+        bind("<Control-Key-0>", lambda _e: (self.zoom_reset(), "break")[1])
+        bind("<Control-MouseWheel>", self._on_ctrl_wheel)
+
+        # 编辑器行为：Tab 必须自己吃掉，否则 Tk 默认会拿它去切换焦点
+        self.body.bind("<Tab>", self._on_tab)
+        self.body.bind("<Shift-Tab>", lambda e: self._on_tab(e, dedent=True))
+        self.body.bind("<ISO_Left_Tab>", lambda e: self._on_tab(e, dedent=True))
+        self.body.bind("<Return>", self._on_return)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  编辑器行为
+    # ══════════════════════════════════════════════════════════════════
+    def _on_tab(self, _event=None, dedent: bool = False):
+        """Tab / Shift+Tab：缩进或反缩进，绝不把焦点移走
+
+        选中多行时整块处理；没有选中就把当前行当一块处理 ——
+        单行反缩进比「删掉光标前一个字符」更符合直觉。
+        """
+        if self._has_selection():
+            first = self.body.index(tk.SEL_FIRST)
+            last = self.body.index(tk.SEL_LAST)
+            start_line = int(first.split(".")[0])
+            end_line = int(last.split(".")[0])
+            # 选区正好停在行首时，那一行不该被算进来
+            if last.split(".")[1] == "0" and end_line > start_line:
+                end_line -= 1
+        else:
+            start_line = end_line = int(self.body.index("insert").split(".")[0])
+
+        self.body.edit_separator()
+        for line in range(start_line, end_line + 1):
+            if dedent:
+                head = self.body.get(f"{line}.0", f"{line}.4")
+                if head.startswith("\t"):
+                    self.body.delete(f"{line}.0", f"{line}.1")
+                else:
+                    strip = len(head) - len(head.lstrip(" "))
+                    if strip:
+                        self.body.delete(f"{line}.0", f"{line}.{min(strip, 4)}")
+            else:
+                self.body.insert(f"{line}.0", " " * 4)
+        self.body.edit_separator()
+
+        if self._has_selection():
+            # 缩进后保持原选区，用户才能连着按几次
+            self.body.tag_remove(tk.SEL, "1.0", "end")
+            self.body.tag_add(tk.SEL, f"{start_line}.0", f"{end_line}.end+1c")
+        self.mark_dirty()
+        return "break"
+
+    def _on_return(self, _event=None):
+        """回车时延续缩进与列表标记 —— 写清单和条目时省一半手"""
+        line_start = self.body.index("insert linestart")
+        line = self.body.get(line_start, "insert")
+
+        # 当前行只有标记没有内容时，回车把标记清掉（结束这个列表）
+        if re.fullmatch(r"[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+(?:\[[ xX]\][ \t]+)?", line):
+            self.body.delete(line_start, "insert")
+            self.body.insert("insert", "\n")
+            self.body.see("insert")
+            self.mark_dirty()
+            return "break"
+
+        item = re.match(r"^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)(\[[ xX]\][ \t]+)?", line)
+        if item:
+            lead, mark, gap, box = item.groups()
+            if mark[0].isdigit():
+                mark = f"{int(re.match(r'\d+', mark).group(0)) + 1}{mark[-1]}"
+            carry = f"{lead}{mark}{gap}" + ("[ ] " if box else "")
+        else:
+            carry = re.match(r"[ \t]*", line).group(0)
+
+        self.body.insert("insert", "\n" + carry)
+        self.body.see("insert")
+        self.mark_dirty()
+        return "break"
+
+    def _on_cursor_move(self, _event=None):
+        self._update_current_line()
+        self._update_cursor_pos()
+
+    def _update_current_line(self):
+        self.body.tag_remove("curline", "1.0", "end")
+        self.body.tag_add("curline", "insert linestart", "insert lineend+1c")
+        # 当前行底色要垫在最下面，不然会盖住查找高亮和选区
+        self.body.tag_lower("curline")
+
+    def _update_cursor_pos(self):
+        line, column = self.body.index("insert").split(".")
+        self.var_cursor.set(f"行 {line} · 列 {int(column) + 1}")
+
+    def toggle_log(self):
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.log_frame.pack(fill="x", padx=10, pady=(0, 4))
+        else:
+            self.log_frame.pack_forget()
+        if hasattr(self, "var_log_menu"):
+            self.var_log_menu.set(self.log_visible)
+        self._sync_minsize()
+        self.say("运行日志面板：" + ("显示" if self.log_visible else "隐藏"))
+
+    def toggle_fullscreen(self):
+        state = not bool(self.root.attributes("-fullscreen"))
+        self.root.attributes("-fullscreen", state)
+        if hasattr(self, "var_fullscreen"):
+            self.var_fullscreen.set(state)
+
+    def on_shortcuts(self):
+        ShortcutsDialog(self.root, self._palette(), self.ui_family, self.editor_family)
+
+    # ══════════════════════════════════════════════════════════════════
+    #  状态与日志
+    # ══════════════════════════════════════════════════════════════════
     def log(self, message: str, kind: str = ""):
         self.log_text.configure(state="normal")
         self.log_text.insert("end", message + "\n", kind or ())
@@ -708,18 +1647,26 @@ class WritepadApp:
         chars, minutes = core.char_stats(body)
         lines = body.count("\n") + 1
         self.var_counts.set(f"{chars} 字 · 约 {minutes} 分钟 · {lines} 行")
+        self._update_cursor_pos()
 
     def _on_body_modified(self, _event=None):
         if not self.body.edit_modified():
             return
         self.body.edit_modified(False)
         self.mark_dirty()
+        self._update_current_line()
         # 统计要遍历全文，按键时别每一下都算，停 400ms 再算
         if self._count_job:
             self.root.after_cancel(self._count_job)
         self._count_job = self.root.after(400, self._refresh_counts)
+        if self.find_bar.winfo_ismapped():
+            if self._find_job:
+                self.root.after_cancel(self._find_job)
+            self._find_job = self.root.after(400, self._highlight_matches)
 
-    # ── 项目读写 ─────────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  项目读写
+    # ══════════════════════════════════════════════════════════════════
     def reload_records(self, keep: str | None = None):
         self.records = core.load_records()
         labels = [self._record_label(r) for r in self.records]
@@ -786,6 +1733,8 @@ class WritepadApp:
             self.body.edit_reset()
             self.body.edit_modified(False)
             self._body_snapshot = record.body
+            self._update_current_line()
+            self._highlight_matches()
 
             self._select_in_box(record.slug)
             self.dirty = False
@@ -909,7 +1858,9 @@ class WritepadApp:
             self.log(f"保存 content/{new_slug}/article.md + meta.json", "ok")
         return True
 
-    # ── 工具栏动作 ───────────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  工具栏动作
+    # ══════════════════════════════════════════════════════════════════
     def on_pick_project(self):
         slug = self._labels.get(self.var_project.get())
         if not slug or (self.current and slug == self.current.slug):
@@ -947,7 +1898,7 @@ class WritepadApp:
     def on_new(self):
         if not self.confirm_discard():
             return
-        dialog = NewProjectDialog(self.root, self.cfg)
+        dialog = NewProjectDialog(self.root, self.cfg, self._palette())
         self.root.wait_window(dialog)
         if not dialog.result:
             return
@@ -1095,14 +2046,15 @@ class WritepadApp:
             )
             self.say(f"自检发现 {len(issues)} 处问题")
             return
-        self.log("自检通过：链接、语言包、行内样式、CSS 类名、图片引用全部正常", "ok")
+        self.log("自检通过：链接、语言包、行内样式、HTML 结构、CSS 类名、图片引用全部正常", "ok")
         unused = core.unused_i18n_keys()
         if unused:
             self.log(f"（参考）语言包里有 {len(unused)} 个键当前没被用到：{', '.join(unused)}", "dim")
         dead = core.unused_css_classes()
         if dead:
             self.log(f"（参考）CSS 里有 {len(dead)} 个类当前没被用到：{', '.join(dead)}", "dim")
-        messagebox.showinfo("自检通过", "链接、语言包、行内样式、CSS 类名、图片引用都正常。",
+        messagebox.showinfo("自检通过",
+                            "链接、语言包、行内样式、HTML 结构、CSS 类名、图片引用都正常。",
                             parent=self.root)
         self.say("自检通过")
 
@@ -1121,14 +2073,16 @@ class WritepadApp:
             messagebox.showerror("打不开目录", str(error), parent=self.root)
 
     def on_settings(self):
-        dialog = SettingsDialog(self.root, core.load_site_config())
+        dialog = SettingsDialog(self.root, core.load_site_config(), self._palette())
         self.root.wait_window(dialog)
         if dialog.saved:
             self.cfg = core.load_site_config()
             self.log("站点设置已保存 —— 点「重新生成全部」让页面生效", "ok")
             self.say("站点设置已保存")
 
-    # ── 插入 Markdown 片段 ───────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  插入 Markdown 片段
+    # ══════════════════════════════════════════════════════════════════
     def _has_selection(self) -> bool:
         try:
             self.body.get(tk.SEL_FIRST, tk.SEL_LAST)
@@ -1216,7 +2170,7 @@ class WritepadApp:
             "![替代文字](images/图.png \"这里是图注，会自动编号成「图 1」\")\n\n"
             "· 图片文件请放在 content/<项目>/images/ 下，生成时会自动复制到项目页目录\n"
             "· 编号是自动的，图注里不要再手写「图 1」\n"
-            "· 点「图片」按钮可以直接把本地图片复制进来并插入这行写法",
+            "· 点「插入 ▾ → 图片」可以直接把本地图片复制进来并插入这行写法",
             parent=self.root,
         )
 
@@ -1294,39 +2248,91 @@ class WritepadApp:
         self.var_cover.set(f"images/{target.name}")
         self.log(f"封面设为 images/{target.name}（首页卡片顶部会通栏显示）", "ok")
 
-    # ── 状态持久化与关闭 ─────────────────────────────────────────────────
+    # ══════════════════════════════════════════════════════════════════
+    #  状态持久化与关闭
+    # ══════════════════════════════════════════════════════════════════
     def _restore_state(self):
         state = core.read_json(STATE_PATH) or {}
-        geometry = state.get("geometry")
-        if geometry:
-            try:
-                self.root.geometry(geometry)
-            except tk.TclError:
-                pass
+
+        # 视图偏好要在界面搭好之后、载入项目之前应用
+        if state.get("theme") in ("light", "dark", "system"):
+            self.theme_choice = state["theme"]
+            self.var_theme.set(self.theme_choice)
+        self.apply_theme()
+
+        zoom = state.get("zoom")
+        if isinstance(zoom, (int, float)) and ZOOM_MIN <= float(zoom) <= ZOOM_MAX:
+            self.set_zoom(float(zoom))
+
         if state.get("mono"):
             self.mono.set(True)
             self.apply_editor_font()
         if state.get("auto_update") is False:
             self.auto_update.set(False)
+        if state.get("log_visible") is False:
+            self.toggle_log()
+
+        geometry = state.get("geometry")
+        if geometry:
+            try:
+                self.root.geometry(self._clamp_geometry(geometry))
+            except tk.TclError:
+                pass
+        if state.get("zoomed"):
+            try:
+                self.root.state("zoomed")
+            except tk.TclError:
+                pass
+
+        sash = state.get("sash")
+        if isinstance(sash, int) and sash > 200:
+            try:
+                self.paned.sashpos(0, sash)
+            except tk.TclError:
+                pass
 
         wanted = state.get("slug")
-        if wanted and wanted in (self._slugs if hasattr(self, "_slugs") else []):
-            if not self.dirty:
-                self.load_record(wanted)
-        self.log("写字板就绪。内容改完点「生成此页」或按 Ctrl+Enter，"
+        if wanted and wanted in getattr(self, "_slugs", []) and not self.dirty:
+            self.load_record(wanted)
+
+        self._sync_minsize()
+        self.log("写字板就绪。改完点「生成此页」或按 Ctrl+Enter，"
                  "首页的卡片与目录会自动重建。", "dim")
         if not self.records:
             self.log("目前一个项目都没有：点左上角「新建」开始第一篇记录。", "warn")
         else:
             self.say(f"共 {len(self.records)} 个项目")
 
+    def _clamp_geometry(self, geometry: str) -> str:
+        """把上次的窗口位置夹回屏幕内 —— 换显示器后旧坐标可能落在屏幕外"""
+        match = re.match(r"(\d+)x(\d+)(?:([+-]\d+)([+-]\d+))?$", geometry or "")
+        if not match:
+            return geometry
+        width, height = int(match.group(1)), int(match.group(2))
+        screen_w, screen_h = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+        width, height = min(width, screen_w), min(height, screen_h)
+        if match.group(3) is None:
+            return f"{width}x{height}"
+        x, y = int(match.group(3)), int(match.group(4))
+        x = max(-20, min(x, screen_w - 200))
+        y = max(0, min(y, screen_h - 120))
+        return f"{width}x{height}+{x}+{y}"
+
     def _save_state(self):
         state = {
             "geometry": self.root.winfo_geometry(),
+            "zoomed": self.root.state() == "zoomed",
             "slug": self.current.slug if self.current else None,
             "mono": bool(self.mono.get()),
             "auto_update": bool(self.auto_update.get()),
+            "theme": self.theme_choice,
+            "zoom": round(self.zoom, 2),
+            "log_visible": bool(self.log_visible),
         }
+        try:
+            state["sash"] = int(self.paned.sashpos(0))
+        except tk.TclError:
+            pass
         try:
             core.write_json(STATE_PATH, state)
         except OSError:
@@ -1342,15 +2348,29 @@ class WritepadApp:
 
 
 def main(argv: list[str] | None = None) -> int:
-    argv = list(sys.argv[1:] if argv is None else argv)
+    parser = argparse.ArgumentParser(
+        prog="writepad.py", description="科研记录写字板（research.who-young.top）")
+    parser.add_argument("slug", nargs="?", help="启动后直接打开的项目路径")
+    parser.add_argument("--theme", choices=("light", "dark", "system"),
+                        help="覆盖本次启动的主题（不写回配置）")
+    parser.add_argument("--zoom", type=int, help="覆盖本次启动的缩放百分比（不写回配置）")
+    args = parser.parse_args(list(sys.argv[1:] if argv is None else argv))
+
+    enable_dpi_awareness()
     root = tk.Tk()
     app = WritepadApp(root)
-    if argv:
-        slug = argv[0].strip()
-        if slug in getattr(app, "_slugs", []):
-            app.load_record(slug)
+
+    if args.theme:
+        app.set_theme(args.theme, announce=False)
+    if args.zoom:
+        app.set_zoom(args.zoom / 100.0, announce=False)
+
+    if args.slug:
+        if args.slug in getattr(app, "_slugs", []):
+            app.load_record(args.slug)
         else:
-            app.log(f"找不到项目 {slug}", "err")
+            app.log(f"找不到项目 {args.slug}", "err")
+
     root.mainloop()
     return 0
 

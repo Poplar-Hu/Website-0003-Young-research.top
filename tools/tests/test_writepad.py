@@ -13,6 +13,8 @@
 import shutil
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
+import types
 import urllib.request
 from pathlib import Path
 
@@ -37,6 +39,16 @@ def ok(cond, label):
         fails.append(label)
 
 
+def same_color(a, b) -> bool:
+    """Tk 会把颜色值规范化（大小写等），比较时统一降到小写"""
+    return str(a).strip().lower() == str(b).strip().lower()
+
+
+def font_size(widget) -> int:
+    """取控件当前实际字号。cget('font') 可能是字符串，交给 tkfont 解析。"""
+    return int(tkfont.Font(root=widget, font=widget.cget("font")).cget("size"))
+
+
 def cleanup():
     for slug in (SLUG, NEW_SLUG):
         d = core.CONTENT_DIR / slug
@@ -52,6 +64,12 @@ def cleanup():
 
 cleanup()
 root = None
+# 状态文件里存的是用户自己的主题/缩放/窗口位置。测试会覆写它来验证持久化，
+# 所以先原样备份，跑完再放回去 —— 不能因为跑个测试就把用户的偏好清掉。
+state_backup = (writepad.STATE_PATH.read_text(encoding="utf-8")
+                if writepad.STATE_PATH.exists() else None)
+if writepad.STATE_PATH.exists():
+    writepad.STATE_PATH.unlink()
 try:
     # 先造一个项目，专门给测试用（绝不碰 example-record）
     core.create_record(SLUG, "冒烟测试项目", status="paused")
@@ -212,6 +230,232 @@ try:
     root.update()
     ok(app._collect_meta()["title"] == "冒烟测试项目", "重新载入后表单仍然正确")
 
+    # ── 主题 ──────────────────────────────────────────────────────────
+    print("\n=== 主题 ===")
+    ok(set(writepad.PALETTES["light"]) == set(writepad.PALETTES["dark"]),
+       "亮暗两套配色的键完全一致（少一个键就会 KeyError）")
+    ok(all(v.startswith("#") or v.startswith("rgb") for v in writepad.PALETTES["dark"].values()),
+       "暗色配色的值都是颜色")
+
+    app.set_theme("light", announce=False)
+    light = app._palette()
+    root.update()
+    ok(same_color(app.body.cget("background"), light["editor_bg"]), "亮色：正文底色跟随主题")
+    ok(same_color(app.root.cget("background"), light["bg"]), "亮色：窗口底色跟随主题")
+    ok(same_color(app.log_text.cget("background"), light["log_bg"]), "亮色：日志底色跟随主题")
+    ok(same_color(app.view_menu.cget("background"), light["field"]), "亮色：弹出菜单也重新配色")
+
+    app.set_theme("dark", announce=False)
+    dark = app._palette()
+    root.update()
+    ok(same_color(app.body.cget("background"), dark["editor_bg"]), "暗色：正文底色跟随主题")
+    ok(same_color(app.body.cget("foreground"), dark["editor_fg"]), "暗色：正文前景色跟随主题")
+    ok(same_color(app.root.cget("background"), dark["bg"]), "暗色：窗口底色跟随主题")
+    ok(same_color(app.log_text.cget("background"), dark["log_bg"]), "暗色：日志底色跟随主题")
+    ok(same_color(app.view_menu.cget("background"), dark["field"]), "暗色：弹出菜单也重新配色")
+    ok(same_color(app.body.tag_cget("curline", "background"), dark["curline"]),
+       "暗色：当前行高亮底色已更新")
+    ok(same_color(app.body.tag_cget("find", "background"), dark["find_bg"]),
+       "暗色：查找高亮底色已更新")
+    ok(dark["editor_bg"] != light["editor_bg"], "两套主题确实不一样")
+
+    app.set_theme("light", announce=False)
+    app.toggle_theme()
+    ok(app.theme_choice == "dark", f"toggle_theme 从亮色切到暗色（{app.theme_choice}）")
+    app.toggle_theme()
+    ok(app.theme_choice == "light", "toggle_theme 再切回亮色")
+    app.set_theme("system", announce=False)
+    ok(app._palette() in (writepad.PALETTES["light"], writepad.PALETTES["dark"]),
+       "跟随系统能解析成一套具体配色")
+
+    # ── 缩放 ──────────────────────────────────────────────────────────
+    print("\n=== 缩放 ===")
+    app.set_theme("light", announce=False)
+    app.set_zoom(1.0, announce=False)
+    base_ui = tkfont.nametofont("TkDefaultFont").cget("size")
+    base_body = font_size(app.body)
+    app.set_zoom(1.5, announce=False)
+    root.update()
+    ok(tkfont.nametofont("TkDefaultFont").cget("size") == round(10 * 1.5),
+       f"150% 时界面字体放大（{base_ui} → {tkfont.nametofont('TkDefaultFont').cget('size')}）")
+    ok(font_size(app.body) == round(11 * 1.5),
+       f"150% 时正文字体放大（{base_body} → {font_size(app.body)}）")
+    ok(app.var_zoom.get() == "缩放 150%", f"状态栏显示缩放比例（{app.var_zoom.get()}）")
+
+    minsize_big = app.root.minsize()
+    app.set_zoom(1.0, announce=False)
+    root.update()
+    minsize_small = app.root.minsize()
+    ok(minsize_big[0] >= minsize_small[0], f"缩放变大时窗口最小宽度跟着变大（{minsize_small[0]} → {minsize_big[0]}）")
+    ok(minsize_small[0] > 0 and minsize_small[1] > 0, "最小尺寸有有效值")
+
+    app.zoom_in()
+    ok(app.zoom == 1.1, f"zoom_in 一档 +10%（{app.zoom}）")
+    app.zoom_out()
+    ok(app.zoom == 1.0, f"zoom_out 一档 -10%（{app.zoom}）")
+    for _ in range(20):
+        app.zoom_in()
+    ok(app.zoom == writepad.ZOOM_MAX, f"放大有上限（{app.zoom}）")
+    for _ in range(30):
+        app.zoom_out()
+    ok(app.zoom == writepad.ZOOM_MIN, f"缩小有下限（{app.zoom}）")
+    app.zoom_reset()
+    ok(app.zoom == 1.0, "zoom_reset 回到 100%")
+    app._on_ctrl_wheel(types.SimpleNamespace(delta=120))
+    ok(app.zoom == 1.1, f"Ctrl+滚轮向上放大（{app.zoom}）")
+    app._on_ctrl_wheel(types.SimpleNamespace(delta=-120))
+    ok(app.zoom == 1.0, "Ctrl+滚轮向下缩小")
+
+    # ── 编辑器行为 ────────────────────────────────────────────────────
+    print("\n=== 编辑器行为 ===")
+    app.body.delete("1.0", "end")
+
+    app.body.insert("1.0", "一行文字")
+    app.body.mark_set("insert", "1.2")
+    app._on_tab()
+    ok(app.body.get("1.0", "end-1c") == "    一行文字",
+       f"Tab 插入四个空格而不是切换焦点（{app.body.get('1.0', 'end-1c')!r}）")
+    app._on_tab(dedent=True)
+    ok(app.body.get("1.0", "end-1c") == "一行文字", "Shift+Tab 反缩进四个空格")
+
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "甲\n乙\n丙")
+    app.body.tag_add(tk.SEL, "1.0", "3.end")
+    app._on_tab()
+    lines = app.body.get("1.0", "end-1c").split("\n")
+    ok(all(line.startswith("    ") for line in lines), f"多行选中整块缩进（{lines}）")
+    app._on_tab(dedent=True)
+    lines = app.body.get("1.0", "end-1c").split("\n")
+    ok(all(not line.startswith(" ") for line in lines), "多行选中整块反缩进")
+
+    # 选区停在下一行行首时，那一行不算被选中（和多数编辑器的约定一致）
+    app.body.tag_remove(tk.SEL, "1.0", "end")
+    app.body.tag_add(tk.SEL, "1.0", "3.0")
+    app._on_tab()
+    lines = app.body.get("1.0", "end-1c").split("\n")
+    ok(lines[0].startswith("    ") and lines[1].startswith("    ")
+       and not lines[2].startswith(" "),
+       f"选区停在行首时最后一行不缩进（{lines}）")
+    app.body.tag_remove(tk.SEL, "1.0", "end")
+    for line in range(1, 4):
+        app.body.delete(f"{line}.0", f"{line}.4")
+
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "- 第一条")
+    app.body.mark_set("insert", "end")
+    app._on_return()
+    ok(app.body.get("1.0", "end-1c") == "- 第一条\n- ", "回车延续无序列表标记")
+    app.body.insert("insert", "第二条")
+    app._on_return()
+    ok(app.body.get("1.0", "end-1c").endswith("- 第二条\n- "), "第二条也会延续")
+
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "3. 第三项")
+    app.body.mark_set("insert", "end")
+    app._on_return()
+    ok(app.body.get("1.0", "end-1c") == "3. 第三项\n4. ", "回车让有序列表编号递增")
+
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "- [ ] 待办")
+    app.body.mark_set("insert", "end")
+    app._on_return()
+    ok(app.body.get("1.0", "end-1c") == "- [ ] 待办\n- [ ] ", "回车延续任务列表并重置为未勾选")
+
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "- ")
+    app.body.mark_set("insert", "end")
+    app._on_return()
+    ok(app.body.get("1.0", "end-1c") == "\n",
+       f"空列表项上回车把标记去掉、只留一个空行（{app.body.get('1.0', 'end-1c')!r}）")
+
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "  indented")
+    app.body.mark_set("insert", "end")
+    app._on_return()
+    ok(app.body.get("1.0", "end-1c") == "  indented\n  ", "回车延续普通缩进")
+
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "第一行\n第二行\n第三行")
+    app.body.mark_set("insert", "2.1")
+    app._on_cursor_move()
+    ranges = app.body.tag_ranges("curline")
+    ok(len(ranges) == 2, "当前行高亮已打上")
+    ok(str(ranges[0]) == "2.0" and str(ranges[1]) == "3.0",
+       f"高亮范围正好是第 2 行（{ranges[0]} → {ranges[1]}）")
+    ok(app.var_cursor.get() == "行 2 · 列 2", f"状态栏显示行列（{app.var_cursor.get()}）")
+
+    # ── 查找 / 替换 ───────────────────────────────────────────────────
+    print("\n=== 查找 / 替换 ===")
+    app.body.delete("1.0", "end")
+    app.body.insert("1.0", "薄膜沉积\n薄膜厚度\n与薄膜无关的一行")
+    app.on_find()
+    root.update()
+    ok(app.find_bar.winfo_ismapped(), "Ctrl+F 后查找条显示出来")
+    app.find_var.set("薄膜")
+    app._highlight_matches()
+    ok(len(app._matches()) == 3, f"找到 3 处匹配（{len(app._matches())}）")
+    ok(app.var_find_info.get() == "3 处", f"匹配数量显示在查找条上（{app.var_find_info.get()}）")
+    ok(len(app.body.tag_ranges("find")) == 6, "所有匹配都打上了高亮 tag")
+
+    app.body.mark_set("insert", "1.0")
+    # 光标停在第一处上，向后走一格 → 第二处（「薄膜」两个字，末尾在第 2 列）
+    app.find_next(True)
+    ok(app.body.index("insert") == "2.2", f"下一个：从第一处走到第二处（{app.body.index('insert')}）")
+    ok(app.body.get(tk.SEL_FIRST, tk.SEL_LAST) == "薄膜", "找到之后这一段被选中，替换才有东西可换")
+    app.find_next(True)
+    ok(app.body.index("insert") == "3.3", f"下一个：继续往后（{app.body.index('insert')}）")
+    app.find_next(True)
+    ok(app.body.index("insert") == "1.2", f"下一个：到底了绕回第一处（{app.body.index('insert')}）")
+    app.find_next(False)
+    ok(app.body.index("insert") == "3.3", f"上一个：从第一处绕回最后一处（{app.body.index('insert')}）")
+
+    app.find_var.set("不存在的内容")
+    app._highlight_matches()
+    ok(app._matches() == [] and app.var_find_info.get() == "没找到", "找不到时给出提示")
+
+    # 替换词刻意不含查找词：否则「全部替换」会把上一次替换的结果再换一遍，
+    # 那属于替换语义本身，不该混进这条断言里
+    app.find_var.set("薄膜")
+    app._highlight_matches()
+    app.replace_var.set("膜层")
+    app.body.mark_set("insert", "1.0")
+    app.find_next(True)                 # 落到第二处，并选中它
+    app.replace_one()
+    ok(app.body.get("1.0", "2.end") == "薄膜沉积\n膜层厚度",
+       f"替换当前匹配（{app.body.get('1.0', '2.end')!r}）")
+    app.replace_all()
+    ok(app.body.get("1.0", "end-1c") == "膜层沉积\n膜层厚度\n与膜层无关的一行",
+       f"全部替换剩余匹配（{app.body.get('1.0', 'end-1c')!r}）")
+    ok(app.dirty is True, "替换算作修改，已标脏")
+
+    app.find_var.set("")
+    app.close_find()
+    root.update()
+    ok(not app.find_bar.winfo_ismapped(), "关闭后查找条隐藏")
+    ok(len(app.body.tag_ranges("find")) == 0, "关闭后查找高亮清干净")
+    ok(len(app.body.tag_ranges("find-current")) == 0, "关闭后当前匹配高亮也清干净")
+
+    # ── 状态持久化 ────────────────────────────────────────────────────
+    print("\n=== 状态持久化 ===")
+    app.set_theme("dark", announce=False)
+    app.set_zoom(1.3, announce=False)
+    app.log_visible = True
+    app._save_state()
+    saved = core.read_json(writepad.STATE_PATH)
+    ok(saved.get("theme") == "dark", "主题被写进状态文件")
+    ok(abs(float(saved.get("zoom", 0)) - 1.3) < 1e-6, f"缩放被写进状态文件（{saved.get('zoom')}）")
+    ok("geometry" in saved and "sash" in saved, "窗口尺寸与分栏位置也记下来了")
+    ok(saved.get("log_visible") is True, "日志面板可见性被记录")
+
+    ok(app._clamp_geometry("3000x2000+9000+9000") != "3000x2000+9000+9000",
+       "屏幕外的窗口坐标会被夹回屏幕内")
+    ok(app._clamp_geometry("1200x800") == "1200x800", "没有坐标的尺寸原样保留")
+    ok(app._clamp_geometry("坏数据") == "坏数据", "无法解析的尺寸不炸，原样返回")
+
+    app.load_record(NEW_SLUG)
+    root.update()
+    ok(app._collect_meta()["title"] == "冒烟测试项目", "测试新功能之后项目数据仍然完好")
+
 finally:
     if root is not None:
         try:
@@ -220,6 +464,11 @@ finally:
             pass
     cleanup()
     core.build_all()
+    # 恢复用户原本的视图偏好
+    if state_backup is not None:
+        writepad.STATE_PATH.write_text(state_backup, encoding="utf-8")
+    elif writepad.STATE_PATH.exists():
+        writepad.STATE_PATH.unlink()
 
 print("\n" + "=" * 60)
 print(f"共 {count[0]} 项断言，失败 {len(fails)} 项" + ("" if not fails else " ❌"))

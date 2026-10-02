@@ -1471,9 +1471,14 @@ def generate_404(cfg: dict) -> None:
 
 def generate_sitemap(cfg: dict) -> None:
     base = cfg["base_url"].rstrip("/")
-    rows = [f'  <url><loc>{base}/</loc><lastmod>{today()}</lastmod>'
+    records = load_records()
+    # 首页的 lastmod 取「最新一条记录的日期」，而不是「今天」——
+    # 用今天的话每次重新生成都会改这个文件，Git 里全是没意义的 diff，
+    # 而实际上内容一个字都没变。
+    latest = max((record.updated or record.date or "" for record in records), default="") or today()
+    rows = [f'  <url><loc>{base}/</loc><lastmod>{latest}</lastmod>'
             f'<changefreq>weekly</changefreq><priority>1.0</priority></url>']
-    for record in load_records():
+    for record in records:
         rows.append(
             f'  <url><loc>{base}/{record.slug}/</loc>'
             f'<lastmod>{esc(record.updated or record.date or today())}</lastmod>'
