@@ -397,12 +397,26 @@ ul, ol { margin: 0; }
 /* ── 项目卡片 ───────────────────────────────────────────────────────────────
    一张卡片 = 一个项目页面，上面直接带「目录预览」：
    把该项目正文里的二级标题列出来，点一下直达对应小节。
+
+   ⚠ 整张卡片**不能**做成 <a>。卡片里本来就有「目录预览」的一组链接，
+      <a> 套 <a> 是非法嵌套，浏览器解析时会把外层 <a> 强行闭合，
+      卡片的后半截（目录 + 阅读全文）就散成了栅格里的独立网格项，布局整个崩。
+      这里改成 <article>，再用标题链接的 ::after 铺一层覆盖全卡的透明层，
+      「点哪儿都能进详情」的效果不变；目录里的链接压在覆盖层之上，照样能点。
    ──────────────────────────────────────────────────────────────────────── */
 .rec-card {
   display: flex; flex-direction: column;
   padding: 26px 26px 22px; height: 100%;
+  position: relative; cursor: pointer;
 }
 .rec-card.is-hidden { display: none; }
+
+/* 铺满整卡的点击层 */
+.rec-card .card-link { color: inherit; }
+.rec-card .card-link::after { content: ''; position: absolute; inset: 0; z-index: 1; }
+/* 目录与「阅读全文」必须盖在点击层上面，否则点不到 */
+.rec-card .rec-toc a,
+.rec-card .rec-foot .go { position: relative; z-index: 2; }
 
 .rec-top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .rec-icon {
@@ -568,6 +582,8 @@ ul, ol { margin: 0; }
   color: var(--gray-400); font-size: .72rem; letter-spacing: .1em;
   display: flex; align-items: center; gap: 6px;
 }
+/* 桌面端目录是常驻展开的，折叠箭头没有意义 —— 只在窄屏（可以点开收起）显示 */
+.doc-toc .toc-title .caret { display: none; }
 .doc-toc ul { list-style: none; padding: 0; margin: 0; }
 .doc-toc li { margin: 0; }
 .doc-toc a {
@@ -592,7 +608,8 @@ ul, ol { margin: 0; }
   .doc-aside { position: static; margin-bottom: 24px; }
   .doc-toc { max-height: none; padding: 8px 0; }
   .doc-toc .toc-title { cursor: pointer; padding: 12px 18px; margin: 0; border-bottom: 0; }
-  .doc-toc .toc-title .caret { transition: transform .2s; }
+  /* 窄屏这里才需要「点我展开」的箭头 */
+  .doc-toc .toc-title .caret { display: inline; transition: transform .2s; }
   .doc-toc.is-open .toc-title .caret { transform: rotate(90deg); }
   .doc-toc ul { display: none; padding-bottom: 8px; }
   .doc-toc.is-open ul { display: block; }

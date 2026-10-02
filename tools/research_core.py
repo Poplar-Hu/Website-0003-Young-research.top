@@ -42,6 +42,7 @@ import shutil
 import sys
 import unicodedata
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from pathlib import Path
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -1257,7 +1258,12 @@ def render_card(record: Record, sections: list[dict], chars: int, minutes: int, 
     pin = ('<span class="rec-pin"><i class="fa fa-thumb-tack"></i>'
            '<span data-i18n="card-pinned">置顶</span></span>') if record.pinned else ""
 
-    return f"""      <a class="card card-hover rec-card" href="/{record.slug}/" data-status="{attr(record.status)}">
+    # 卡片**不能**做成 <a>：卡片里还有「目录预览」的链接，<a> 套 <a> 是非法嵌套，
+    # 浏览器解析时会直接把外层 <a> 强行闭合，卡片的后半截（目录、阅读全文）
+    # 会散到父容器里变成独立的网格项，整个栅格就崩了。
+    # 改成 <article> + 一个铺满整卡的标题链接（见 research.css 的 .card-link::after），
+    # 点哪儿都能进详情，目录里的链接再压在覆盖层之上。
+    return f"""      <article class="card card-hover rec-card" data-status="{attr(record.status)}">
         <div class="rec-top">
           <div class="rec-icon bg-{attr(record.color)}"><i class="fa {attr(record.icon)}"></i></div>
           <div class="rec-flags">
@@ -1265,7 +1271,7 @@ def render_card(record: Record, sections: list[dict], chars: int, minutes: int, 
             <span class="status status-{attr(record.status)}" data-i18n="status-{attr(record.status)}">{STATUS_TEXT[record.status]}</span>
           </div>
         </div>{cover_html}
-        <h3>{esc(record.title)}</h3>
+        <h3><a class="card-link" href="/{record.slug}/">{esc(record.title)}</a></h3>
         <p class="rec-summary">{esc(record.summary) or "（还没有写摘要）"}</p>
         <div class="rec-meta">
           <span><i class="fa fa-refresh"></i> {esc(human_date(record.updated))}</span>
@@ -1277,10 +1283,10 @@ def render_card(record: Record, sections: list[dict], chars: int, minutes: int, 
           {toc_inner}
         </div>
         <div class="rec-foot">
-          <span class="go"><span data-i18n="card-read">阅读全文</span> <i class="fa fa-arrow-right"></i></span>
+          <a class="go" href="/{record.slug}/"><span data-i18n="card-read">阅读全文</span> <i class="fa fa-arrow-right"></i></a>
           <span class="words">{len(sections)} <span data-i18n="unit-sections">节</span></span>
         </div>
-      </a>"""
+      </article>"""
 
 
 def render_catalog_item(record: Record, sections: list[dict]) -> str:
@@ -1695,6 +1701,80 @@ def run_checks() -> list[str]:
     #    否则就是「HTML 写了 class 但样式没跟上」，页面会静默走版
     problems += _check_css_coverage()
 
+    # 9. HTML 结构不能被浏览器纠错重构（<a> 套 <a> 之类）
+    problems += _check_html_nesting()
+
+    return problems
+
+
+# ── 结构检查 ─────────────────────────────────────────────────────────────
+#: 自闭合标签，解析器不该为它们等待结束标签
+VOID_TAGS = frozenset({
+    "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+    "meta", "param", "source", "track", "wbr",
+})
+#: 块级元素：出现在 <p> 内部就是非法嵌套
+BLOCK_TAGS = frozenset({
+    "div", "p", "table", "ul", "ol", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+    "figure", "blockquote", "pre", "section", "article", "header", "footer",
+    "nav", "aside", "main", "details", "summary", "hr", "form",
+})
+
+
+class _NestingChecker(HTMLParser):
+    """栈式结构检查，专抓「源码看着配平、但浏览器会静默重构」的非法嵌套
+
+    最典型的是 <a> 里套 <a>：解析器遇到内层 <a> 会把外层强行闭合，
+    外层元素的后半截内容会散到它的父容器里 —— 如果外层是栅格项，
+    这些内容就变成了新的网格项，整个布局崩掉，而 HTML 源码看起来毫无问题。
+
+    这个坑本站真踩过：项目卡片原本整体是 <a>，卡片里的「目录预览」每组标题
+    也是 <a>，结果卡片的后半截被顶到第 2、3 列去显示。
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack: list[str] = []
+        self.problems: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in VOID_TAGS:
+            return
+        line = self.getpos()[0]
+        if tag == "a" and "a" in self.stack:
+            self.problems.append(
+                f"<a> 里又套了 <a>（内层 <a> 在第 {line} 行）—— "
+                "浏览器会把外层 <a> 强行闭合，它的后半截内容会散到父容器里"
+            )
+        if tag in BLOCK_TAGS and self.stack and self.stack[-1] == "p":
+            self.problems.append(f"第 {line} 行：<p> 里套了块级 <{tag}>")
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if tag in VOID_TAGS:
+            return
+        if tag not in self.stack:
+            self.problems.append(f"第 {self.getpos()[0]} 行：多余的结束标签 </{tag}>")
+            return
+        while self.stack and self.stack[-1] != tag:
+            self.problems.append(
+                f"第 {self.getpos()[0]} 行：<{self.stack.pop()}> 没有正确闭合"
+            )
+        if self.stack:
+            self.stack.pop()
+
+
+def _check_html_nesting() -> list[str]:
+    problems: list[str] = []
+    for path in _generated_html():
+        rel = path.relative_to(ROOT).as_posix()
+        checker = _NestingChecker()
+        checker.feed(read_text(path))
+        unclosed = [t for t in checker.stack if t not in ("html", "head", "body")]
+        if unclosed:
+            checker.problems.append(f"文件结束时仍未闭合：{unclosed}")
+        for problem in checker.problems:
+            problems.append(f"{rel} · {problem}")
     return problems
 
 
