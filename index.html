@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+<title data-i18n="page-title">科研记录 | Populus Hu</title>
+<meta name="description" content="Populus Hu 的科研记录：每个实验项目一篇长文，含目的、装置、步骤、数据与结论。" data-i18n="meta-desc">
+
+<link rel="icon" href="/assets/icon.ico" sizes="32x32">
+<link rel="stylesheet" href="/assets/font-awesome.min.css">
+<link rel="stylesheet" href="/assets/research.css">
+<script defer src="/assets/lang.js"></script>
+<script defer src="/assets/research.js"></script>
+</head>
+<body>
+<header class="navbar" id="navbar">
+  <div class="nav-decoration"></div>
+  <div class="nav-inner">
+
+    <div class="nav-left">
+      <a class="brand" href="/">
+        <i class="fa fa-connectdevelop"></i>Populus Hu<small data-i18n="brand-tag">科研记录</small>
+      </a>
+      <div class="lang-desktop">
+        <select class="language-selector" aria-label="语言 / Language">
+          <option value="cn" selected>中文</option>
+          <option value="en">English</option>
+          <option value="jp">日本語</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="menu-toggle" id="menu-toggle" aria-label="菜单" aria-expanded="false" aria-controls="nav-links">
+      <i class="fa fa-bars"></i>
+    </button>
+
+    <nav class="nav-links" id="nav-links">
+      <a href="/" class="is-active" data-i18n="nav-records">全部记录</a>
+      <a href="https://tools.who-young.top" data-i18n="nav-tools">在线工具</a>
+      <a href="https://who-young.top" class="back"><i class="fa fa-home"></i><span data-i18n="nav-main">主站</span></a>
+      <div class="lang-mobile">
+        <select class="language-selector" aria-label="语言 / Language">
+          <option value="cn" selected>中文</option>
+          <option value="en">English</option>
+          <option value="jp">日本語</option>
+        </select>
+      </div>
+    </nav>
+
+  </div>
+</header>
+<main>
+
+  <section class="hero">
+    <div class="hero-glow" aria-hidden="true"></div>
+    <div class="wrap">
+      <span class="badge" data-i18n="hero-badge">科研记录</span>
+      <h1 data-i18n="hero-title">把实验过程<br><span class='grad'>完整留下来</span></h1>
+      <p data-i18n="hero-desc">
+        每个项目一篇长文：目的、装置与参数、步骤、原始数据、分析和结论。正文用本地写字板写，一键生成静态页面，首页的卡片与目录也会跟着重建。
+      </p>
+      <div class="hero-actions">
+        <a class="btn-hero btn-hero-primary" href="#records" data-i18n="hero-btn-records">浏览全部记录</a>
+        <a class="btn-hero btn-hero-ghost" href="https://who-young.top" data-i18n="hero-btn-main">回到主站</a>
+      </div>
+    </div>
+    <a class="hero-scroll" href="#records"><span data-i18n="hero-scroll">向下滚动</span><i class="fa fa-angle-down"></i></a>
+  </section>
+
+  <section class="section wrap" id="records">
+
+    <div class="section-head">
+      <span class="badge" data-i18n="sec-badge">全部记录</span>
+      <h2 data-i18n="sec-title">项目与目录</h2>
+      <p data-i18n="sec-desc">每张卡片是一个项目，卡片上直接列出该项目的章节目录，点进去就能跳到对应小节。</p>
+    </div>
+
+    <div class="stat-strip">
+        <span class="item"><span class="v">1</span><span class="k" data-i18n="stat-projects">个项目</span></span>
+        <span class="item"><span class="v">2026-10-03</span><span class="k" data-i18n="stat-updated">最近更新</span></span>
+        <span class="item"><span class="v">805</span><span class="k" data-i18n="stat-chars">总字数</span></span>
+      </div>
+      <div class="filter-bar" id="filter-bar">
+        <span class="lbl" data-i18n="filter-label">状态</span>
+        <button class="chip" type="button" data-status="all"><span data-i18n="filter-all">全部</span> <span class="n">1</span></button>
+        <button class="chip" type="button" data-status="active"><span data-i18n="filter-active">进行中</span> <span class="n">1</span></button>
+      </div>
+
+    <div class="grid cols-3" id="record-grid">
+
+      <a class="card card-hover rec-card" href="/example-record/" data-status="active">
+        <div class="rec-top">
+          <div class="rec-icon bg-lav"><i class="fa fa-book"></i></div>
+          <div class="rec-flags">
+            <span class="rec-pin"><i class="fa fa-thumb-tack"></i><span data-i18n="card-pinned">置顶</span></span>
+            <span class="status status-active" data-i18n="status-active">进行中</span>
+          </div>
+        </div>
+        <h3>示例记录：一篇实验记录该怎么写</h3>
+        <p class="rec-summary">把「目的 → 装置与参数 → 步骤 → 原始数据 → 分析 → 结论」这条链子完整走一遍，顺便演示表格、代码块、Mermaid 图和带编号的插图。看明白了就可以整篇删掉。</p>
+        <div class="rec-meta">
+          <span><i class="fa fa-refresh"></i> 2026-10-03</span>
+          <span><i class="fa fa-file-text-o"></i> 805 <span data-i18n="unit-chars">字</span></span>
+          <span><i class="fa fa-clock-o"></i> <span data-i18n="unit-about">约</span> 2 <span data-i18n="unit-minutes">分钟</span></span>
+        </div><div class="rec-tags">
+          <span class="tag">示例</span>
+          <span class="tag">模板</span>
+          <span class="tag">写作规范</span>
+        </div>
+        <div class="rec-toc">
+          <div class="toc-title"><i class="fa fa-list-ul"></i> <span data-i18n="card-toc">目录预览</span></div>
+          <ol>
+            <li><a href="/example-record/#目的与假设">目的与假设</a></li>
+            <li><a href="/example-record/#装置与参数">装置与参数</a></li>
+            <li><a href="/example-record/#步骤">步骤</a></li>
+            <li><a href="/example-record/#原始数据">原始数据</a></li>
+            <li><a href="/example-record/#分析与讨论">分析与讨论</a></li>
+            <li><a href="/example-record/#结论与下一步">结论与下一步</a></li>
+          </ol>
+        </div>
+        <div class="rec-foot">
+          <span class="go"><span data-i18n="card-read">阅读全文</span> <i class="fa fa-arrow-right"></i></span>
+          <span class="words">6 <span data-i18n="unit-sections">节</span></span>
+        </div>
+      </a>
+
+    </div>
+    <div class="notice notice-info mt-md hidden" id="filter-empty"><i class="fa fa-filter"></i><div data-i18n="filter-empty">没有符合这个状态的项目。</div></div>
+
+    <div class="section-head mt-lg">
+        <span class="badge" data-i18n="cat-badge">完整目录</span>
+        <h2 data-i18n="cat-title">按项目展开</h2>
+        <p data-i18n="cat-desc">点开任意一个项目，可以直接跳到它下面的任意小节。</p>
+      </div>
+
+      <div class="catalog">
+        <details class="cat-proj">
+          <summary>
+            <span class="caret"><i class="fa fa-angle-right"></i></span>
+            <span class="t">示例记录：一篇实验记录该怎么写</span>
+            <span class="side">
+              <span class="status status-active" data-i18n="status-active">进行中</span>
+              <span class="cat-date">2026-10-03</span>
+            </span>
+          </summary><div class="cat-body"><ol>
+              <li><a href="/example-record/#目的与假设"><i class="fa fa-angle-right"></i> 目的与假设</a></li>
+              <li><a href="/example-record/#装置与参数"><i class="fa fa-angle-right"></i> 装置与参数</a></li>
+              <li><a href="/example-record/#步骤"><i class="fa fa-angle-right"></i> 步骤</a></li>
+              <li><a href="/example-record/#原始数据"><i class="fa fa-angle-right"></i> 原始数据</a></li>
+              <li><a href="/example-record/#分析与讨论"><i class="fa fa-angle-right"></i> 分析与讨论</a></li>
+              <li><a href="/example-record/#结论与下一步"><i class="fa fa-angle-right"></i> 结论与下一步</a></li>
+            </ol></div>
+          <div class="cat-actions">
+            <a class="btn btn-sm" href="/example-record/"><span data-i18n="cat-open">打开项目页</span> <i class="fa fa-arrow-right"></i></a>
+          </div>
+        </details>
+      </div>
+
+  </section>
+
+</main>
+<footer class="site-footer">
+  <div class="wrap">
+    <div class="foot-top">
+      <div>
+        <a class="brand" href="https://who-young.top"><i class="fa fa-connectdevelop"></i>Populus Hu</a>
+        <p class="foot-desc" data-i18n="footer-desc">我的数字家园，连接你我</p>
+      </div>
+      <nav class="foot-nav">
+        <a href="https://who-young.top" data-i18n="footer-home">主站首页</a>
+        <a href="/" data-i18n="footer-records">全部记录</a>
+        <a href="https://tools.who-young.top" data-i18n="footer-tools">在线工具</a>
+        <a href="https://who-young.top/#contact" data-i18n="footer-contact">联系我</a>
+      </nav>
+    </div>
+    <div class="foot-bottom">
+      <p data-i18n="footer-copyright">© 2026 Populus Hu | 保留所有权利。</p>
+      <div class="foot-bottom-right">
+        <select class="language-selector language-selector-dark" aria-label="语言 / Language">
+          <option value="cn" selected>中文</option>
+          <option value="en">English</option>
+          <option value="jp">日本語</option>
+        </select>
+        <a class="to-top" href="#top" id="to-top"><i class="fa fa-angle-up"></i> <span data-i18n="to-top">回到顶部</span></a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

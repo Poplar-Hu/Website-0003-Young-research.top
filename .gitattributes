@@ -1,0 +1,15 @@
+# 统一行尾为 LF，与主站仓库 Website-0001-Young-main.top 保持一致
+* text=auto eol=lf
+
+# 第三方压缩产物：它们是下载来的原样文件，不做任何行尾转换
+assets/vendor/*  -text
+
+# 二进制资源
+assets/fonts/*  binary
+*.ico           binary
+*.png           binary
+*.jpg           binary
+*.jpeg          binary
+*.webp          binary
+*.gif           binary
+*.pdf           binary

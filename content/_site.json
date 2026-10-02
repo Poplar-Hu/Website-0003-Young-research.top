@@ -1,0 +1,13 @@
+{
+  "base_url": "https://research.who-young.top",
+  "main_site": "https://who-young.top",
+  "tools_site": "https://tools.who-young.top",
+  "contact_url": "https://who-young.top/#contact",
+  "repo_url": "https://github.com/Poplar-Hu/Website-0003-Young-research.top",
+  "toc_preview_limit": 6,
+  "show_stats": true,
+  "show_catalog": true,
+  "default_icon": "fa-flask",
+  "default_color": "blue",
+  "default_status": "active"
+}

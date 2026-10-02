@@ -1,0 +1,14 @@
+{
+  "title": "示例记录：一篇实验记录该怎么写",
+  "slug": "example-record",
+  "date": "2026-10-03",
+  "updated": "2026-10-03",
+  "status": "active",
+  "tags": ["示例", "模板", "写作规范"],
+  "summary": "把「目的 → 装置与参数 → 步骤 → 原始数据 → 分析 → 结论」这条链子完整走一遍，顺便演示表格、代码块、Mermaid 图和带编号的插图。看明白了就可以整篇删掉。",
+  "icon": "fa-book",
+  "color": "lav",
+  "cover": "",
+  "order": 1,
+  "pinned": true
+}
